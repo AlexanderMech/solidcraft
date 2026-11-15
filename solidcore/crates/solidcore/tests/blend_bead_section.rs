@@ -37,7 +37,7 @@ use solidcore::math::{Point3, Vec3};
 use solidcore::primitive::api_curves::{create_arc, create_line_segment};
 use solidcore::query::api_queries::edge_closest_point;
 use solidcore::surface::procedural_blend::bead::{
-    equal_legs_for_throat, BeadArc, BeadDefinition, BeadSpan,
+    equal_legs_for_throat, BeadArc, BeadDefinition, BeadSpan, BeadStation,
 };
 use solidcore::surface::procedural_blend::chamfer::{ChamferDefinition, ChamferSize};
 use solidcore::sweep::api_brep::create_linear_sweep;
@@ -1203,4 +1203,71 @@ fn equal_legs_come_back_from_their_throat() {
         assert!((z - 5.0).abs() <= 1e-12, "{alpha} {h}: {z}");
     }
     assert!((equal_legs_for_throat(3.0, FRAC_PI_2, 0.5) - 3.0 * 2f64.sqrt()).abs() <= 1e-12);
+}
+
+/// A station between planes ([`BeadStation`] with the faces' directions to the edge) has its
+/// [`BeadDefinition`]'s toe angles and bounds.
+#[test]
+fn a_station_between_planes_has_the_definitions_bounds() {
+    for (alpha, d) in [(FRAC_PI_2, [5.0, 5.0]), (FRAC_PI_3, [4.0, 6.0]), (2.0 * FRAC_PI_3, [5.0, 3.0])] {
+        let (s, c) = f64::sin_cos(alpha);
+        let station = BeadStation {
+            feet: [Point3::new(d[0], 0.0, 0.0), Point3::new(d[1] * c, d[1] * s, 0.0)],
+            toward_edge: [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(-c, -s, 0.0)],
+        };
+        let def = BeadDefinition::new(
+            ChamferDefinition::new(ChamferSize::Distances(d), alpha).unwrap(),
+            0.1,
+        )
+        .unwrap();
+        let [a, b] = station.toe_angles().unwrap();
+        let [p, q] = def.toe_angles();
+        assert!((a - p).abs() <= 1e-14 && (b - q).abs() <= 1e-14, "{alpha}");
+        for h in [-0.1, 0.1] {
+            assert!((station.bound(h).unwrap() - def.bound(h)).abs() <= 1e-13, "{alpha} {h}");
+        }
+        assert!((station.overhang_bound().unwrap() - def.overhang_bound()).abs() <= 1e-13);
+    }
+}
+
+/// On a curved face the bounds hold at the toe: a fin welded to a pipe (radius 20), the
+/// station in the plane square to the pipe's axis, the pipe's foot on its circle. At each
+/// bound the arc leaves its toe at the angle that bound names, measured from the face's own
+/// tangent there: square at the overhang bound, along the face (away from the edge) at the
+/// convex bound, along the face towards the edge at the concave one.
+#[test]
+fn on_a_pipe_the_bounds_hold_at_the_toe() {
+    let rp = 20.0;
+    let along = Vec3::new(0.0, 0.0, 1.0);
+    for (d1, d2) in [(5.0, 5.0), (4.0, 7.0), (8.0, 3.0)] {
+        let phi: f64 = d2 / rp;
+        let station = BeadStation {
+            feet: [
+                Point3::new(rp + d1, 0.0, 0.0),
+                Point3::new(rp * phi.cos(), rp * phi.sin(), 0.0),
+            ],
+            toward_edge: [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(phi.sin(), -phi.cos(), 0.0)],
+        };
+        let toes = station.toe_angles().unwrap();
+        let edge = Point3::new(rp, 0.0, 0.0);
+        let [f1, f2] = station.feet;
+        let away = (f1 + (f2 - f1) * 0.5) - edge;
+        // the angle the arc leaves foot i at, from the face's tangent towards the edge
+        let leave = |h: f64| -> [f64; 2] {
+            let arc = BeadArc::new(f1, f2, along, away, h).unwrap();
+            let out = [arc.tangent(0.0), -arc.tangent(arc.turn)];
+            [0, 1].map(|i| {
+                let t = station.toward_edge[i];
+                out[i].cross(t).length().atan2(out[i].dot(t))
+            })
+        };
+        let steep = usize::from(toes[1] > toes[0]);
+        let flat = 1 - steep;
+        let at = leave(station.overhang_bound().unwrap());
+        assert!((at[steep] - FRAC_PI_2).abs() <= 1e-9, "{d1} {d2}: overhang {at:?}");
+        let at = leave(station.bound(1.0).unwrap());
+        assert!((at[steep] - PI).abs() <= 1e-6, "{d1} {d2}: convex {at:?}");
+        let at = leave(-station.bound(-1.0).unwrap());
+        assert!(at[flat].abs() <= 1e-6, "{d1} {d2}: concave {at:?}");
+    }
 }

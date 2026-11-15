@@ -320,6 +320,64 @@ pub fn overhang_bound(chord: f64, toes: [f64; 2]) -> f64 {
     chord / 2.0 * (lean / 2.0).tan()
 }
 
+/// One station of a bead on faces of any shape: its two feet and, at each, the unit tangent
+/// of its face in the section's plane pointing from the foot towards the edge. Between planes
+/// the tangents are the faces' directions to the edge and the station is the
+/// [`BeadDefinition`]'s triangle; on a curved face the toe angle is the face's at its foot, so
+/// the bounds hold to first order at the toe (where the arc leaves the face). Whether the arc
+/// meets a curved face again away from the toe is the trace's room check, not a station's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BeadStation {
+    /// The feet on the first and second face.
+    pub feet: [Point3; 2],
+    /// Each face's unit tangent at its foot, in the section's plane, towards the edge.
+    pub toward_edge: [Vec3; 2],
+}
+
+impl BeadStation {
+    /// The chord between the feet.
+    #[must_use]
+    pub fn chord(&self) -> f64 {
+        (self.feet[1] - self.feet[0]).length()
+    }
+
+    /// The toe angles: at each foot, between its face's tangent towards the edge and the chord
+    /// to the other foot.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` for feet that coincide or a tangent of no length.
+    pub fn toe_angles(&self) -> Result<[f64; 2]> {
+        let c = (self.feet[1] - self.feet[0]).unitize()?;
+        let angle = |a: Vec3, b: Vec3| -> Result<f64> {
+            let a = a.unitize()?;
+            Ok(a.cross(b).length().atan2(a.dot(b)))
+        };
+        Ok([
+            angle(self.toward_edge[0], c)?,
+            angle(self.toward_edge[1], -c)?,
+        ])
+    }
+
+    /// The sagitta's open bound at this station ([`sagitta_bound`] at its toe angles).
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Self::toe_angles`].
+    pub fn bound(&self, sagitta: f64) -> Result<f64> {
+        Ok(sagitta_bound(self.chord(), self.toe_angles()?, sagitta))
+    }
+
+    /// Where a convex arc starts to overhang a toe here ([`overhang_bound`] at its toe angles).
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Self::toe_angles`].
+    pub fn overhang_bound(&self) -> Result<f64> {
+        Ok(overhang_bound(self.chord(), self.toe_angles()?))
+    }
+}
+
 /// Where along its edge a bead runs: from `from` to `to`, fractions of the edge's length from
 /// its start (`0 <= from < to <= 1`).
 #[derive(Debug, Clone, Copy, PartialEq)]

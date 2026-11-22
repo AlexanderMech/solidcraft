@@ -9,6 +9,7 @@
 //! | Rust                                      | Status difftest compares |
 //! |-------------------------------------------|--------------------------|
 //! | [`WeldFailure::ConcaveFaceCrossesWall`]   | `SM_ERR` (no C++)        |
+//! | [`WeldFailure::ConcaveFaceTooDeep`]       | `SM_ERR` (no C++)        |
 //! | [`WeldFailure::ConvexFaceTooHigh`]        | `SM_ERR` (no C++)        |
 //! | [`WeldFailure::BlendedToesOffPlane`]      | `SM_ERR` (no C++)        |
 
@@ -28,10 +29,18 @@ pub enum WeldSide {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum WeldFailure {
-    /// A concave face `depth` deep would touch or cross the section's other sides (a groove
-    /// wall, the other face or the bottom), or dip past half a circle. The failure's fit is
-    /// the deepest that builds, in closed form.
+    /// A concave face `depth` deep reaches the section's other sides (a groove wall, the other
+    /// face or the bottom). The failure's fit is the depth where the face first touches one,
+    /// in closed form; every depth below it less the kernel's zone tolerance builds.
     ConcaveFaceCrossesWall {
+        /// Which face.
+        side: WeldSide,
+        /// The depth asked for.
+        depth: f64,
+    },
+    /// A concave face `depth` deep dips past half a circle, touching nothing. The failure's
+    /// fit is the half circle: half the toe distance, which builds.
+    ConcaveFaceTooDeep {
         /// Which face.
         side: WeldSide,
         /// The depth asked for.
@@ -62,6 +71,7 @@ impl WeldFailure {
     pub(crate) const fn comparison_status(&self) -> i32 {
         match self {
             Self::ConcaveFaceCrossesWall { .. }
+            | Self::ConcaveFaceTooDeep { .. }
             | Self::ConvexFaceTooHigh { .. }
             | Self::BlendedToesOffPlane { .. } => SM_ERR,
         }
@@ -72,6 +82,7 @@ impl WeldFailure {
     pub const fn kind(&self) -> ErrorKind {
         match self {
             Self::ConcaveFaceCrossesWall { .. }
+            | Self::ConcaveFaceTooDeep { .. }
             | Self::ConvexFaceTooHigh { .. }
             | Self::BlendedToesOffPlane { .. } => ErrorKind::Unsupported,
         }
@@ -87,7 +98,12 @@ impl core::fmt::Display for WeldFailure {
         match *self {
             Self::ConcaveFaceCrossesWall { side, depth } => write!(
                 f,
-                "a concave {} {depth} deep crosses the section's other sides",
+                "a concave {} {depth} deep reaches the section's other sides",
+                name(side)
+            ),
+            Self::ConcaveFaceTooDeep { side, depth } => write!(
+                f,
+                "a concave {} {depth} deep is past half a circle",
                 name(side)
             ),
             Self::ConvexFaceTooHigh { side, height } => write!(

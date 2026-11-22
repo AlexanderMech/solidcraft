@@ -68,8 +68,10 @@
 //!
 //! A concave face is built as asked and returns how deep it dips: below the chord, and below
 //! each plate's outer face where the plates' normal is given (between plates in one plane that
-//! is below the plate's surface: ISO 6520-1 no. 511). It is refused only when it would cross a
-//! wall, with the deepest that builds ([`WeldFailure::ConcaveFaceCrossesWall`]).
+//! is below the plate's surface: ISO 6520-1 no. 511). Its limit is closed form: the depth where
+//! it first touches another side of the section (a wall, the bottom, the other face), refused
+//! from that depth less the kernel's zone tolerance on ([`WeldFailure::ConcaveFaceCrossesWall`]);
+//! else the half circle, which still builds ([`WeldFailure::ConcaveFaceTooDeep`] past it).
 //!
 //! # Not covered
 //!
@@ -204,10 +206,11 @@ pub struct GrooveWeld {
 /// not finite, that do not run away from the face, that cross each other, a plates' normal
 /// that is not finite or points into the plates, or a contour or depth that is not finite and
 /// positive. A face this construction does not build is refused as a [`WeldFailure`]: a
-/// convex face past half a circle ([`WeldFailure::ConvexFaceTooHigh`]) and a concave face
-/// that would cross the section's other sides ([`WeldFailure::ConcaveFaceCrossesWall`]), each
-/// with the size that builds as its [`Fit`], in closed form; blended toes where the plates'
-/// outer faces do not run along the chord ([`WeldFailure::BlendedToesOffPlane`]).
+/// convex face past half a circle ([`WeldFailure::ConvexFaceTooHigh`]), a concave face that
+/// reaches the section's other sides ([`WeldFailure::ConcaveFaceCrossesWall`]) or dips past
+/// half a circle ([`WeldFailure::ConcaveFaceTooDeep`]), each with its limit as its [`Fit`], in
+/// closed form; blended toes where the plates' outer faces do not run along the chord
+/// ([`WeldFailure::BlendedToesOffPlane`]).
 pub fn fill(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<GrooveWeld> {
     check_input(section, options)?;
     build(k, section, options)
@@ -248,6 +251,9 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
     // the plates, where they are parallel; else the chord
     let plates = match section.plate_normal {
         Some(n) => {
+            // scaled by its larger part first, so neither its length's overflow nor its
+            // underflow matters
+            let n = n * (1.0 / n.x.abs().max(n.y.abs()));
             let up = n * (1.0 / n.length());
             if up.dot(chord_up) <= 0.0 {
                 return Err(SolidError::invalid_input(
@@ -270,6 +276,12 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
         .flat_map(|s| deepest_points(s, -up))
         .map(below)
         .fold(0.0_f64, f64::max);
+    if groove_depth <= eps {
+        return Err(SolidError::invalid_input(
+            OP,
+            "a groove of no depth below the lower plate's face",
+        ));
+    }
     let through = lb.distance(rb) > eps;
     // where a groove that runs through opens on the root side: past it the weld is full
     // penetration
@@ -356,7 +368,8 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
         } else {
             others.extend(bottom.iter().copied());
         }
-        limits.push((WeldSide::Face, depth, concave_limit(l0, r0, &others, eps)));
+        let (fit, contact) = concave_limit(l0, r0, &others, eps);
+        limits.push((WeldSide::Face, depth, fit, contact));
     }
     if let (true, Contour::Concave { depth }) = (second_used, second(options)) {
         let mut others = walls;
@@ -365,48 +378,50 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
                 .clone()
                 .unwrap_or_else(|| vec![Seg2::Line { a: l0, b: r0 }]),
         );
-        limits.push((WeldSide::Second, depth, concave_limit(rb, lb, &others, eps)));
+        let (fit, contact) = concave_limit(rb, lb, &others, eps);
+        limits.push((WeldSide::Second, depth, fit, contact));
     }
-    let concave_refusal = |at_limit: bool| {
-        limits.iter().find_map(|&(side, depth, fit)| {
-            let past = if at_limit {
-                depth >= fit * (1.0 - 1e-9) - eps
-            } else {
-                depth > fit + eps
-            };
-            past.then(|| {
-                Failure::new(
-                    OP,
-                    Reason::Weld(WeldFailure::ConcaveFaceCrossesWall { side, depth }),
-                )
-                .with_fit(Fit::new(fit, FitMeasure::Distance, None))
-                .into_error()
-            })
-        })
-    };
-    if let Some(refusal) = concave_refusal(false) {
-        return Err(refusal);
+    // a face that touches another side is refused from `fit - delta` on (delta the larger of
+    // the build's rounding and the kernel's zone tolerance); the half circle builds
+    let delta = eps.max(k.tolerances.zone_tol_3d);
+    for &(side, depth, fit, contact) in &limits {
+        let why = if contact && depth >= fit - delta {
+            WeldFailure::ConcaveFaceCrossesWall { side, depth }
+        } else if !contact && depth > fit + eps {
+            WeldFailure::ConcaveFaceTooDeep { side, depth }
+        } else {
+            continue;
+        };
+        return Err(Failure::new(OP, Reason::Weld(why))
+            .with_fit(Fit::new(fit, FitMeasure::Distance, None))
+            .into_error());
     }
     if second_used {
-        bottom = second_path.ok_or_else(|| {
-            concave_refusal(true)
-                .unwrap_or_else(|| unbuilt(WeldSide::Second, rb, lb, second(options)))
-        })?;
+        bottom = second_path.ok_or_else(|| unbuilt(WeldSide::Second, rb, lb, second(options)))?;
     }
-    let face = face_path.ok_or_else(|| {
-        concave_refusal(true).unwrap_or_else(|| unbuilt(WeldSide::Face, l0, r0, options.face))
-    })?;
+    let face = face_path.ok_or_else(|| unbuilt(WeldSide::Face, l0, r0, options.face))?;
 
     // the loop, clockwise: face, right wall down, bottom, left wall up
     let mut segs = face.clone();
-    segs.extend(right_wall);
+    segs.extend(right_wall.iter().copied());
     segs.extend(bottom.clone());
     segs.extend(left_wall.iter().rev().map(Seg2::reversed));
-    if crosses(&segs, eps.max(1e-12) * 100.0) {
-        // a concave face at its limit touches a side within the crossing test's tolerance
-        return Err(concave_refusal(true).unwrap_or_else(|| {
-            SolidError::invalid_input(OP, "a section that crosses itself (walls that cross)")
-        }));
+    // the input check on the walls: a concave face, sized above, stands in as its chord
+    let mut check = match options.face {
+        Contour::Concave { .. } => vec![Seg2::Line { a: l0, b: r0 }],
+        _ => face.clone(),
+    };
+    check.extend(right_wall.iter().copied());
+    match (second_used, second(options)) {
+        (true, Contour::Concave { .. }) => check.push(Seg2::Line { a: rb, b: lb }),
+        _ => check.extend(bottom.iter().copied()),
+    }
+    check.extend(left_wall.iter().rev().map(Seg2::reversed));
+    if crosses(&check, eps.max(1e-12) * 100.0) {
+        return Err(SolidError::invalid_input(
+            OP,
+            "a section that crosses itself (walls that cross)",
+        ));
     }
     let region = Region2 {
         outer: Loop2 { segs }.reversed(),
@@ -527,7 +542,7 @@ fn check_input(section: &GrooveSection, options: &FillOptions) -> Result<()> {
     let positive = |v: f64| v.is_finite() && v > 0.0;
     if section
         .plate_normal
-        .is_some_and(|n| !(n.x.is_finite() && n.y.is_finite()) || n.length() == 0.0)
+        .is_some_and(|n| !(n.x.is_finite() && n.y.is_finite()) || (n.x == 0.0 && n.y == 0.0))
     {
         return Err(SolidError::invalid_input(
             OP,
@@ -685,15 +700,21 @@ fn check_face(
 }
 
 /// Why a face whose limits hold still has no polyline arcs (its arcs a rounding past half a
-/// circle at the limit): a convex face is too high, with its fit.
+/// circle at the limit): a convex face is too high, a concave one too deep, with its fit.
 fn unbuilt(side: WeldSide, p: Point2, q: Point2, contour: Contour) -> SolidError {
     let a = 0.5 * p.distance(q);
     let (height, overlap) = match contour {
         Contour::Convex { height } => (height, 0.0),
         Contour::ConvexBlended { height, overlap } => (height, overlap.max(0.0)),
-        Contour::Flat | Contour::Concave { .. } => {
-            return SolidError::invalid_input(OP, "a face that does not build");
+        Contour::Concave { depth } => {
+            return Failure::new(
+                OP,
+                Reason::Weld(WeldFailure::ConcaveFaceTooDeep { side, depth }),
+            )
+            .with_fit(Fit::new(a, FitMeasure::Distance, None))
+            .into_error();
         }
+        Contour::Flat => return SolidError::invalid_input(OP, "a face that does not build"),
     };
     Failure::new(
         OP,
@@ -703,14 +724,15 @@ fn unbuilt(side: WeldSide, p: Point2, q: Point2, contour: Contour) -> SolidError
     .into_error()
 }
 
-/// The deepest concave arc from `p` to `q` (dipping on the right of the run) that touches none
-/// of `others`, at most half the chord (the half circle). Closed form: the arcs through `p`
+/// The depth where a concave arc from `p` to `q` (dipping on the right of the run) first
+/// touches one of `others`, and whether it does (`false`: none is touched up to the half
+/// circle, half the chord, which is then the limit). Closed form: the arcs through `p`
 /// and `q` are a pencil of circles, each deeper one below the one before, so the first that
 /// touches a side does so at one of its ends or where it is tangent to it. The circle of dip
 /// `s` has its centre `m + n (R - s)`, `R = (a² + s²) / 2s` (`m` the chord's middle, `a` half
 /// of it, `n` its normal on the outside); tangency with a line or a circle is a quadratic in
 /// `s`, a point's circle is direct.
-fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> f64 {
+fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool) {
     let chord = q - p;
     let a = 0.5 * chord.length();
     let e = chord * (0.5 / a);
@@ -723,10 +745,11 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> f64 {
     // within the arcs' reach: below the chord, between the toes
     let inside = |x: Point2| (x - m).dot(n) <= eps && (x - m).dot(e).abs() <= a + eps;
     let tol = eps.max(1e-12) * 100.0;
-    let mut best = a;
+    let (mut best, mut contact) = (a, false);
     let mut take = |s: f64| {
-        if s > eps && s < best {
+        if s > 0.0 && s <= best {
             best = s;
+            contact = true;
         }
     };
     let at_toe = |x: Point2| x.distance(p).min(x.distance(q)) <= tol;
@@ -752,7 +775,9 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> f64 {
                 continue;
             }
             let h = (v.dot(v) - a * a) / (2.0 * under);
-            take((a * a + h * h).sqrt() - h);
+            // R - h, without the cancellation of the difference when h is large
+            let r = (a * a + h * h).sqrt();
+            take(if h > 0.0 { a * a / (r + h) } else { r - h });
         }
         match *seg {
             Seg2::Line { a: l0, b: l1 } => {
@@ -816,7 +841,7 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> f64 {
             _ => {}
         }
     }
-    best
+    (best, contact)
 }
 
 /// The unit direction a side runs in from `toe`, where it starts or ends there.

@@ -497,8 +497,10 @@ fn a_concave_face_across_the_walls_is_refused_with_the_deepest_that_builds() {
             ..w.clone()
         })
     };
-    assert!(just(fit * (1.0 - 1e-9)).is_ok());
-    assert!(just(fit * (1.0 + 1e-6)).is_err());
+    // refused from the touch less the zone tolerance (1e-5) on, built below it
+    assert!(just(fit).is_err());
+    assert!(just(fit - 1e-6).is_err());
+    assert!(just(fit - 2e-5).is_ok());
 }
 
 #[test]
@@ -808,7 +810,23 @@ fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
             "{n:?}: {err:?}"
         );
     }
-    // a normal of any length works, and on plates in one plane changes nothing
+    // a normal of any length works, the tiny and the huge too, and on plates in one plane
+    // changes nothing
+    for n in [Vec2::new(0.0, 1e-200), Vec2::new(0.0, 1e200)] {
+        let tiny_or_huge = run(&Case {
+            plate_normal: Some(n),
+            depth: Some(4.0),
+            ..weld(l.clone(), r.clone())
+        })
+        .unwrap();
+        let unit = run(&Case {
+            plate_normal: Some(Vec2::new(0.0, 1.0)),
+            depth: Some(4.0),
+            ..weld(l.clone(), r.clone())
+        })
+        .unwrap();
+        assert_eq!(tiny_or_huge, unit, "{n:?}");
+    }
     let one_plane = run(&Case {
         plate_normal: Some(Vec2::new(0.0, 3.0)),
         depth: Some(4.0),
@@ -990,8 +1008,23 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
         }
     );
     assert!((fit.unwrap() - 1.0).abs() < 1e-12, "{fit:?}");
-    // both faces concave on a thin X, each past what builds: a typed refusal, the face first,
-    // sized against the second face as asked
+    // just short of the touch: still the typed refusal (the crossing check never decides)
+    let cut = |depth: f64| Case {
+        face: Contour::Concave { depth },
+        depth: Some(1.0),
+        ..weld(v_walls(6.0, 60.0, 0.0).0, v_walls(6.0, 60.0, 0.0).1)
+    };
+    let (why, fit) = refused(&cut(1.0 - 1e-7));
+    assert!(
+        matches!(why, WeldFailure::ConcaveFaceCrossesWall { .. }),
+        "{why:?}"
+    );
+    assert!((fit.unwrap() - 1.0).abs() < 1e-12);
+    assert!(run(&cut(1.0)).is_err());
+    assert!(run(&cut(1.0 - 2e-5)).is_ok());
+    // both faces concave on a thin X, each past what builds: a typed refusal, the face first.
+    // The second face is past its half circle, so its chord stands in, and the toe decides:
+    // a tan 30 with a = 0.5 + tan 30
     let (l, r) = x_walls(2.0, 0.0);
     let (why, fit) = refused(&Case {
         face: Contour::Concave { depth: 1.5 },
@@ -1009,5 +1042,70 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
         "{why:?}"
     );
     let fit = fit.unwrap();
-    assert!(fit > 0.0 && fit < 1.5, "{fit}");
+    assert!((fit - 0.622_008_467_928_146_2).abs() < 1e-12, "{fit}");
+
+    // a square groove 10 wide and 4 deep through the plate: a concave face meets a concave
+    // second face 2 high in the middle, at 4 - 2
+    let square = weld(
+        vec![line(p(-5.0, 0.0), p(-5.0, -4.0))],
+        vec![line(p(5.0, 0.0), p(5.0, -4.0))],
+    );
+    let (why, fit) = refused(&Case {
+        face: Contour::Concave { depth: 2.5 },
+        second_face: Some(Contour::Concave { depth: 2.0 }),
+        ..square.clone()
+    });
+    assert_eq!(
+        why,
+        WeldFailure::ConcaveFaceCrossesWall {
+            side: WeldSide::Face,
+            depth: 2.5
+        }
+    );
+    assert!((fit.unwrap() - 2.0).abs() < 1e-12, "{fit:?}");
+    assert!(run(&Case {
+        face: Contour::Concave { depth: 2.0 - 2e-5 },
+        second_face: Some(Contour::Concave { depth: 2.0 }),
+        ..square.clone()
+    })
+    .is_ok());
+    // the second face against a flat face 4 above it: the touch at 4, refused there
+    let second = |depth: f64| Case {
+        second_face: Some(Contour::Concave { depth }),
+        ..square.clone()
+    };
+    let (why, fit) = refused(&second(4.0));
+    assert_eq!(
+        why,
+        WeldFailure::ConcaveFaceCrossesWall {
+            side: WeldSide::Second,
+            depth: 4.0
+        }
+    );
+    assert!((fit.unwrap() - 4.0).abs() < 1e-12, "{fit:?}");
+    assert!(run(&second(4.0 - 2e-5)).is_ok());
+}
+
+#[test]
+fn a_concave_face_that_touches_nothing_builds_up_to_its_half_circle() {
+    // walls that open outwards under the face (an undercut, 135 degrees from the chord): the
+    // half circle touches nothing and builds; deeper is refused as too deep, with the half
+    // circle
+    let w = |depth: f64| Case {
+        face: Contour::Concave { depth },
+        ..weld(
+            vec![line(p(-3.0, 0.0), p(-9.0, -6.0))],
+            vec![line(p(3.0, 0.0), p(9.0, -6.0))],
+        )
+    };
+    assert!(run(&w(3.0)).is_ok());
+    let (why, fit) = refused(&w(3.5));
+    assert_eq!(
+        why,
+        WeldFailure::ConcaveFaceTooDeep {
+            side: WeldSide::Face,
+            depth: 3.5
+        }
+    );
+    assert!((fit.unwrap() - 3.0).abs() < 1e-12, "{fit:?}");
 }

@@ -137,6 +137,9 @@ fn arc_build(radius: f64, sweep: f64, tol: f64) -> std::result::Result<ArcBuild,
     }
 }
 
+/// The radius an arc of a profile stays below ([`check_regions`]).
+pub const MAX_ARC_RADIUS: f64 = 1e9;
+
 /// Highest degree of a [`Seg2::Bezier`].
 pub const MAX_BEZIER_DEGREE: usize = 9;
 
@@ -805,7 +808,7 @@ pub fn check_regions<'a>(
                     finite(center)
                         && radius.is_finite()
                         && radius > 0.0
-                        && radius < 1e9
+                        && radius < MAX_ARC_RADIUS
                         && start.is_finite()
                         && sweep.is_finite()
                         && zone_ok

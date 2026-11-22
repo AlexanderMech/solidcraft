@@ -1181,8 +1181,13 @@ fn a_face_shallower_than_any_arc_is_built_flat_or_refused_with_the_smallest_arc(
                 size: 1e-4
             }
         );
+        // the fit builds: the smallest arc for a convex face, the deepest that builds for a
+        // concave one (here far deeper, short of the walls)
         let fit = fit.unwrap();
-        assert!((fit - 5e-4).abs() < 1e-9, "{fit}");
+        match face {
+            Contour::Concave { .. } => assert!(fit > 5e-4, "{fit}"),
+            _ => assert!((fit - 5e-4).abs() < 1e-9, "{fit}"),
+        }
         let at_fit = match face {
             Contour::Concave { .. } => Contour::Concave { depth: fit },
             _ => Contour::Convex { height: fit },
@@ -1231,4 +1236,99 @@ fn the_fit_of_a_convex_face_builds_when_retried() {
             "{face:?}"
         );
     }
+}
+
+/// Retries a refused weld at its fit until it builds (at most three times): the last weld.
+fn retry_until_built(mut w: Case, at: fn(f64) -> Contour) -> (Case, usize) {
+    for tries in 0..3 {
+        let Err(err) = run(&w) else {
+            return (w, tries);
+        };
+        w.face = at(err.fit().expect("every refusal here has a fit").size);
+    }
+    panic!("still refused after three retries: {:?}", run(&w));
+}
+
+#[test]
+fn a_shallow_concave_face_and_what_it_touches_agree_on_one_fit_that_builds() {
+    // a groove 2000 wide filled 3e-4 deep: the cut line is touched below the smallest arc
+    // (5e-4), so the only face that builds there is the flat one, at the zone tolerance
+    let w = Case {
+        face: Contour::Concave { depth: 1e-3 },
+        depth: Some(3e-4),
+        ..weld(
+            vec![line(p(-1000.0, 0.0), p(-999.0, -6.0))],
+            vec![line(p(1000.0, 0.0), p(999.0, -6.0))],
+        )
+    };
+    let (why, fit) = refused(&w);
+    assert!(
+        matches!(why, WeldFailure::ConcaveFaceCrossesWall { .. }),
+        "{why:?}"
+    );
+    assert_eq!(fit, Some(ZONE));
+    let (built, tries) = retry_until_built(w, |depth| Contour::Concave { depth });
+    assert_eq!(tries, 1);
+    assert_eq!(
+        section(&built)
+            .notes
+            .last()
+            .map(|n| matches!(n, GrooveNote::BuiltFlat { .. })),
+        Some(true)
+    );
+}
+
+#[test]
+fn shallow_blended_toes_build_or_are_refused_with_a_fit_that_builds() {
+    let blended = |height: f64| Contour::ConvexBlended {
+        height,
+        overlap: 1.0,
+    };
+    let groove = |a: f64| Case {
+        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        ..weld(
+            vec![line(p(-a, 0.0), p(-(a - 1.0), -6.0))],
+            vec![line(p(a, 0.0), p(a - 1.0, -6.0))],
+        )
+    };
+    for (a, height) in [(3.0, 1e-3), (100.0, 1e-2), (1000.0, 1e-3)] {
+        assert!(
+            run(&Case {
+                face: blended(height),
+                ..groove(a)
+            })
+            .is_ok(),
+            "a {a}, h {height}: {:?}",
+            run(&Case {
+                face: blended(height),
+                ..groove(a)
+            })
+        );
+    }
+    // a 2000 wide: below the blended toes' own floor (x a / 2e9, x = a + o) refused typed, and
+    // the fit builds
+    let (why, fit) = refused(&Case {
+        face: blended(1e-4),
+        ..groove(1000.0)
+    });
+    assert_eq!(
+        why,
+        WeldFailure::FaceTooShallow {
+            side: WeldSide::Face,
+            size: 1e-4
+        }
+    );
+    let fit = fit.unwrap();
+    assert!((fit - 1001.0 * 1000.0 / 2e9).abs() < 1e-9, "{fit}");
+    let (_, tries) = retry_until_built(
+        Case {
+            face: blended(1e-4),
+            ..groove(1000.0)
+        },
+        |h| Contour::ConvexBlended {
+            height: h,
+            overlap: 1.0,
+        },
+    );
+    assert_eq!(tries, 1);
 }

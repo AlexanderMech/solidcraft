@@ -33,8 +33,9 @@ pub enum WeldFailure {
     /// A concave face `depth` deep reaches the section's other sides (a groove wall, the other
     /// face or the bottom). The face first touches one at a depth `F`, in closed form. The
     /// failure's fit is the deepest that builds: `F - δ`, δ the depth margin (the larger of the
-    /// section's rounding allowance, 1e-9 of its size, and the kernel's zone tolerance), and
-    /// at least the zone tolerance, up to which a face is built flat.
+    /// section's conservative allowance, 1e-9 of its size, and the kernel's zone tolerance), where
+    /// that reaches the smallest arc the profile builds; else the zone tolerance, up to which a
+    /// face is built flat.
     ConcaveFaceCrossesWall {
         /// Which face.
         side: WeldSide,
@@ -51,7 +52,9 @@ pub enum WeldFailure {
     },
     /// A face (convex or concave) `size` high or deep: past the kernel's zone tolerance, so
     /// not built flat, but shallower than the smallest arc the profile builds on its chord.
-    /// The failure's fit is that smallest arc's height.
+    /// The failure's fit builds: that smallest arc's height for a convex face; for a concave
+    /// one, the deepest that builds below what it touches if that reaches the smallest arc,
+    /// else the zone tolerance (built flat).
     FaceTooShallow {
         /// Which face.
         side: WeldSide,

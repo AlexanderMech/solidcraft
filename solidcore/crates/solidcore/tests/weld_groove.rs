@@ -1,8 +1,7 @@
 //! Groove welds (`weld::groove`): the section of every standard groove and of grooves that
 //! match no standard against closed-form areas, the contour of each face (a weld from one side
 //! has a flat root, a weld from both sides a second face of its own), the penetration depth and
-//! its notices, and the refusals; the body along a straight joint, and the proof that the
-//! part's groove faces run straight along it.
+//! its notices, and the refusals.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -14,19 +13,12 @@ use std::f64::consts::{FRAC_PI_2, PI};
 
 use solidcore::error::Reason;
 use solidcore::error::Result;
-use solidcore::eval::Frame;
-use solidcore::mass::integrator::properties::brep_volume_default;
 use solidcore::math::{Point2, Vec2};
-use solidcore::prism::extrude::extrude_region;
 use solidcore::prism::profile::Seg2;
-use solidcore::prism::profile::{Loop2, Region2};
-use solidcore::topology::brep::validation::{check_brep, CheckLevel};
 use solidcore::weld::groove::{
-    body, fill, wall_straying, Contour, FillOptions, GrooveNote, GrooveSection, GrooveWeld,
-    WeldFailure, WeldSide,
+    fill, Contour, FillOptions, GrooveNote, GrooveSection, GrooveWeld, WeldFailure, WeldSide,
 };
-use solidcore::SolidError;
-use solidcore::{Brep, Kernel, Vec3};
+use solidcore::{Kernel, SolidError};
 
 /// Gap between the plates in every example.
 const G: f64 = 1.0;
@@ -108,7 +100,7 @@ fn run(c: &Case) -> Result<GrooveWeld> {
         second_face: c.second_face,
         depth: c.depth,
     };
-    fill(&section, &options)
+    fill(&Kernel::default(), &section, &options)
 }
 
 fn section(w: &Case) -> GrooveWeld {
@@ -352,13 +344,18 @@ fn blended_toes_run_out_tangentially_past_the_groove() {
     let groove = G * t + t * t * tan(30.0);
     let a = G / 2.0 + t * tan(30.0);
     let h = 1.5;
+    // the plates' outer faces along the chord (plates in one plane): blended toes build
+    let flat = Case {
+        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        ..weld(l.clone(), r.clone())
+    };
     // an overlap equal to the crest height (ops' default)
     let w = Case {
         face: Contour::ConvexBlended {
             height: h,
             overlap: h,
         },
-        ..weld(l.clone(), r.clone())
+        ..flat.clone()
     };
     close(area(&w), groove + blended_cap(a, h, h));
     let s = section(&w);
@@ -398,7 +395,7 @@ fn blended_toes_run_out_tangentially_past_the_groove() {
             height: h,
             overlap: 0.5,
         },
-        ..weld(l.clone(), r.clone())
+        ..flat
     };
     close(area(&w), groove + blended_cap(a, h, 0.5));
 
@@ -487,17 +484,21 @@ fn a_concave_face_across_the_walls_is_refused_with_the_deepest_that_builds() {
         })
     );
     // the arc leaves the 60 degree V where its end tangent is steeper than the wall: at
-    // 2 atan(d / a) = 60 degrees
+    // 2 atan(d / a) = 60 degrees, d = a tan 30 (closed form, not searched)
     let fit = err
         .fit()
         .expect("the refusal says the depth that builds")
         .size;
-    assert!((fit - a * tan(30.0)).abs() < 1e-3, "fit {fit}");
-    let builds = Case {
-        face: Contour::Concave { depth: fit },
-        ..w
+    assert!((fit - a * tan(30.0)).abs() < 1e-12, "fit {fit}");
+    assert!((fit - 2.288_675_134_594_813).abs() < 1e-12, "fit {fit}");
+    let just = |depth: f64| {
+        run(&Case {
+            face: Contour::Concave { depth },
+            ..w.clone()
+        })
     };
-    assert!(run(&builds).is_ok());
+    assert!(just(fit * (1.0 - 1e-9)).is_ok());
+    assert!(just(fit * (1.0 + 1e-6)).is_err());
 }
 
 #[test]
@@ -608,11 +609,6 @@ fn bad_walls_contours_and_depths_are_refused_as_invalid_input() {
         },
         Case {
             face: Contour::Concave { depth: -1.0 },
-            ..ok.clone()
-        },
-        // a convex face more than half a circle (half the toe distance is 3.96)
-        Case {
-            face: Contour::Convex { height: 4.5 },
             ..ok.clone()
         },
         Case {
@@ -850,174 +846,168 @@ fn a_concave_face_past_half_a_circle_is_refused_with_the_half_circle() {
         })
     );
     let fit = err.fit().unwrap().size;
-    assert!((fit - 3.0).abs() < 1e-3, "fit {fit}");
+    assert!((fit - 3.0).abs() < 1e-12, "fit {fit}");
 }
 
-/// The section's frame on a joint along z: the section's x along x, its y (out of the face)
-/// along y.
-fn joint_frame() -> Frame {
-    Frame {
-        origin: [0.0, 0.0, 0.0],
-        x_axis: [1.0, 0.0, 0.0],
-        y_axis: [0.0, 1.0, 0.0],
-    }
-}
-
-fn valid(k: &mut Kernel, b: &mut Brep) {
-    b.use_arena_naming().unwrap();
-    let lines = check_brep(k, b, CheckLevel::Level2).unwrap().lines();
-    assert!(lines.is_empty(), "{lines:?}");
-}
-
-#[test]
-fn a_straight_groove_weld_is_its_section_swept_along_the_joint() {
-    let mut k = Kernel::default();
-    let (l, r) = v_walls(6.0, 60.0, 0.0);
-    let length = 120.0;
-    for face in [
-        Contour::Flat,
-        Contour::Convex { height: 1.5 },
-        Contour::ConvexBlended {
-            height: 1.5,
-            overlap: 1.5,
-        },
-        Contour::Concave { depth: 1.0 },
-    ] {
-        let w = section(&Case {
-            face,
-            ..weld(l.clone(), r.clone())
-        });
-        let area = w.region.signed_area().unwrap().value;
-        let mut b = body(&mut k, &w, &joint_frame(), length).unwrap();
-        valid(&mut k, &mut b);
-        let volume = brep_volume_default(&k, &mut b, 1e-9).unwrap();
-        assert!(
-            (volume - area * length).abs() <= 1e-7 * area * length,
-            "{face:?}: volume {volume} != {}",
-            area * length
-        );
-    }
-    let w = section(&weld(l, r));
-    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        let err = body(&mut k, &w, &joint_frame(), bad).unwrap_err();
-        assert!(
-            matches!(err, SolidError::InvalidInput { .. }),
-            "{bad}: {err:?}"
-        );
-    }
-}
-
-/// A plate with the left wall of a groove: its outline in the section (counter-clockwise)
-/// swept `length` along z.
-fn plate(k: &mut Kernel, outline: Vec<Seg2>, length: f64) -> Brep {
-    let region = Region2 {
-        outer: Loop2 { segs: outline },
-        holes: Vec::new(),
+/// The typed refusal of a weld, and its fit.
+fn refused(w: &Case) -> (WeldFailure, Option<f64>) {
+    let err = run(w).unwrap_err();
+    let SolidError::Failed(failure) = &err else {
+        panic!("not a typed refusal: {err:?}");
     };
-    extrude_region(k, &joint_frame(), &region, 0.0, length).unwrap()
-}
-
-fn closed(points: &[Point2]) -> Vec<Seg2> {
-    (0..points.len())
-        .map(|i| line(points[i], points[(i + 1) % points.len()]))
-        .collect()
+    let Reason::Weld(why) = failure.reason else {
+        panic!("not a weld refusal: {err:?}");
+    };
+    (why, err.fit().map(|f| f.size))
 }
 
 #[test]
-fn the_parts_groove_faces_are_proved_straight_along_the_joint() {
-    let mut k = Kernel::default();
-    let length = 120.0;
-    // the left plate of a 60 degree V, 6 thick: its bevel, its underside, its far end, its top
-    let top = G / 2.0 + 6.0 * tan(30.0);
-    let left = plate(
-        &mut k,
-        closed(&[
-            p(-top, 0.0),
-            p(-40.0, 0.0),
-            p(-40.0, -6.0),
-            p(-G / 2.0, -6.0),
-        ]),
-        length,
+fn a_convex_face_past_half_a_circle_is_refused_with_the_highest_that_builds() {
+    let (l, r) = v_walls(6.0, 60.0, 0.0);
+    let a = G / 2.0 + 6.0 * tan(30.0);
+    let flat = Case {
+        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        ..weld(l, r)
+    };
+    // a plain convex face: half the toe distance
+    let (why, fit) = refused(&Case {
+        face: Contour::Convex { height: 4.5 },
+        ..flat.clone()
+    });
+    assert_eq!(
+        why,
+        WeldFailure::ConvexFaceTooHigh {
+            side: WeldSide::Face,
+            height: 4.5
+        }
     );
-    let before = format!("{left:?}");
-    let faces = left.face_list();
-    assert_eq!(faces.len(), 6);
-    let along = Vec3::new(0.0, 0.0, 1.0);
-    let straying: Vec<Option<f64>> = faces
-        .iter()
-        .map(|&f| wall_straying(&left, &[f], along, length))
-        .collect();
-    // the four side faces run along the joint; the two ends stand square to it
-    let straight = straying
-        .iter()
-        .filter(|e| e.is_some_and(|e| e < 1e-9))
-        .count();
-    let ends = straying
-        .iter()
-        .filter(|e| e.is_some_and(|e| e >= length))
-        .count();
-    assert_eq!((straight, ends), (4, 2), "{straying:?}");
-    // a joint 1 degree off: the faces that run along x stray across it by about
-    // length * sin(1 degree) and more
-    let skew = Vec3::new(0.0, 1.0_f64.to_radians().sin(), 1.0_f64.to_radians().cos());
-    let side: Vec<_> = faces
-        .iter()
-        .copied()
-        .zip(&straying)
-        .filter(|(_, e)| e.is_some_and(|e| e < 1e-9))
-        .map(|(f, _)| f)
-        .collect();
-    assert!(wall_straying(&left, &side, skew, length).unwrap() > 1.0);
-    // nothing proved from bad input
-    assert!(wall_straying(&left, &side, Vec3::new(0.0, 0.0, 0.0), length).is_none());
-    assert!(wall_straying(&left, &side, along, f64::NAN).is_none());
-    assert!(wall_straying(&left, &[], along, length).is_none());
-    // the part is only read
-    assert_eq!(format!("{left:?}"), before);
+    assert!((fit.unwrap() - a).abs() < 1e-12);
+    assert!(run(&Case {
+        face: Contour::Convex {
+            height: a * (1.0 - 1e-9)
+        },
+        ..flat.clone()
+    })
+    .is_ok());
+    // blended toes: half the toe distance plus the overlap
+    let (why, fit) = refused(&Case {
+        face: Contour::ConvexBlended {
+            height: a + 1.5,
+            overlap: 1.0,
+        },
+        ..flat.clone()
+    });
+    assert_eq!(
+        why,
+        WeldFailure::ConvexFaceTooHigh {
+            side: WeldSide::Face,
+            height: a + 1.5
+        }
+    );
+    assert!((fit.unwrap() - (a + 1.0)).abs() < 1e-12);
+    assert!(run(&Case {
+        face: Contour::ConvexBlended {
+            height: (a + 1.0) * (1.0 - 1e-9),
+            overlap: 1.0,
+        },
+        ..flat
+    })
+    .is_ok());
+}
 
-    // a right plate whose groove face is a free-form curve swept along the joint (an
-    // extrusion): proved straight along it too
-    let right = plate(
-        &mut k,
-        vec![
-            Seg2::Cubic {
-                p0: p(G / 2.0, -6.0),
-                p1: p(G / 2.0 + 1.0, -4.0),
-                p2: p(G / 2.0 + 2.0, -1.0),
-                p3: p(top, 0.0),
-            },
-            line(p(top, 0.0), p(40.0, 0.0)),
-            line(p(40.0, 0.0), p(40.0, -6.0)),
-            line(p(40.0, -6.0), p(G / 2.0, -6.0)),
-        ],
-        length,
+#[test]
+fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
+    let blended = Contour::ConvexBlended {
+        height: 1.0,
+        overlap: 1.0,
+    };
+    // no common plate normal (a T- or corner joint)
+    let (l, r) = v_walls(6.0, 60.0, 0.0);
+    let (why, fit) = refused(&Case {
+        face: blended,
+        ..weld(l, r)
+    });
+    assert_eq!(
+        why,
+        WeldFailure::BlendedToesOffPlane {
+            side: WeldSide::Face
+        }
     );
-    let curved: Vec<_> = right
-        .face_list()
-        .iter()
-        .copied()
-        .filter(|&f| {
-            !matches!(
-                right.face(f).unwrap().surface.as_ref().unwrap().kind(),
-                solidcore::surface::surface::SurfaceKind::Plane(_)
-            )
-        })
-        .collect();
-    assert_eq!(curved.len(), 1, "one face is not a plane");
+    assert_eq!(fit, None);
+    // offset plates: the right one 2 lower
+    let (l0, lb) = (p(-(G / 2.0 + 8.0 * tan(30.0)), 0.0), p(-G / 2.0, -8.0));
+    let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), -2.0), p(G / 2.0, -10.0));
+    let (why, _) = refused(&Case {
+        face: blended,
+        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        ..weld(vec![line(l0, lb)], vec![line(r0, rb)])
+    });
+    assert_eq!(
+        why,
+        WeldFailure::BlendedToesOffPlane {
+            side: WeldSide::Face
+        }
+    );
+    // plates of unequal thickness, faces flush: blended toes on the face build, on the second
+    // face (root sides 2 apart) they are refused
+    let (l0, lb) = (p(-(G / 2.0 + 10.0 * tan(30.0)), 0.0), p(-G / 2.0, -10.0));
+    let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), 0.0), p(G / 2.0, -8.0));
+    let unequal = Case {
+        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        ..weld(vec![line(l0, lb)], vec![line(r0, rb)])
+    };
+    assert!(run(&Case {
+        face: blended,
+        ..unequal.clone()
+    })
+    .is_ok());
+    let (why, _) = refused(&Case {
+        second_face: Some(blended),
+        ..unequal
+    });
+    assert_eq!(
+        why,
+        WeldFailure::BlendedToesOffPlane {
+            side: WeldSide::Second
+        }
+    );
+}
+
+#[test]
+fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
+    let (l, r) = v_walls(6.0, 60.0, 0.0);
+    // filled 1 deep: the cut line under the face is what the arc reaches first, at 1
+    let (why, fit) = refused(&Case {
+        face: Contour::Concave { depth: 1.5 },
+        depth: Some(1.0),
+        ..weld(l, r)
+    });
+    assert_eq!(
+        why,
+        WeldFailure::ConcaveFaceCrossesWall {
+            side: WeldSide::Face,
+            depth: 1.5
+        }
+    );
+    assert!((fit.unwrap() - 1.0).abs() < 1e-12, "{fit:?}");
+    // both faces concave on a thin X, each past what builds: a typed refusal, the face first,
+    // sized against the second face as asked
+    let (l, r) = x_walls(2.0, 0.0);
+    let (why, fit) = refused(&Case {
+        face: Contour::Concave { depth: 1.5 },
+        second_face: Some(Contour::Concave { depth: 1.5 }),
+        ..weld(l, r)
+    });
     assert!(
         matches!(
-            right
-                .face(curved[0])
-                .unwrap()
-                .surface
-                .as_ref()
-                .unwrap()
-                .kind(),
-            solidcore::surface::surface::SurfaceKind::SurfOfExtrusion(_)
+            why,
+            WeldFailure::ConcaveFaceCrossesWall {
+                side: WeldSide::Face,
+                ..
+            }
         ),
-        "the swept curve is an extrusion"
+        "{why:?}"
     );
-    let e = wall_straying(&right, &curved, along, length).expect("an extrusion is proved");
-    assert!(e < 1e-9, "{e}");
-    assert!(wall_straying(&right, &curved, skew, length).unwrap() > 1.0);
+    let fit = fit.unwrap();
+    assert!(fit > 0.0 && fit < 1.5, "{fit}");
 }

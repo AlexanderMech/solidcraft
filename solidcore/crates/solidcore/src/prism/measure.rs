@@ -159,9 +159,8 @@ fn net_of(s: &Surface) -> Option<Net> {
 /// `height`: a plane's normal against `d`, a cylinder's axis against it, an extrusion's
 /// direction against it (its rulings are straight along that direction, whatever its
 /// generator), a ruled net's rows against it (positive weights make the hull a bound on the
-/// surface). `None` where none is proved. Shared with the groove weld's walls
-/// (`crate::weld::groove`).
-pub(crate) fn wall_error(surface: &Surface, d: Vec3, height: f64, work: &mut usize) -> Option<f64> {
+/// surface). `None` where none is proved.
+fn wall_error(surface: &Surface, d: Vec3, height: f64, work: &mut usize) -> Option<f64> {
     if let Some((_, n)) = plane_of(surface) {
         let error = 1024.0
             * f64::EPSILON
@@ -1133,5 +1132,61 @@ mod tests {
             area: Interval::enclosing(800.0, 1e-8).unwrap(),
         };
         assert!(separated_material(&[doubled], 1e-6, &mut 16_000_000).is_none());
+    }
+
+    /// An extrusion's wall (here a free-form curve swept along z) is bounded by its direction
+    /// against the prism's, whatever its generator: straight along z, and a degree off is not.
+    #[test]
+    fn an_extrusion_wall_is_bounded_by_its_direction() {
+        let mut k = Kernel::default();
+        let p = |x: f64, y: f64| Vec2::new(x, y);
+        let region = Region2 {
+            outer: Loop2 {
+                segs: vec![
+                    Seg2::Cubic {
+                        p0: p(0.0, 0.0),
+                        p1: p(4.0, -2.0),
+                        p2: p(8.0, 2.0),
+                        p3: p(12.0, 0.0),
+                    },
+                    Seg2::Line {
+                        a: p(12.0, 0.0),
+                        b: p(12.0, 6.0),
+                    },
+                    Seg2::Line {
+                        a: p(12.0, 6.0),
+                        b: p(0.0, 6.0),
+                    },
+                    Seg2::Line {
+                        a: p(0.0, 6.0),
+                        b: p(0.0, 0.0),
+                    },
+                ],
+            },
+            holes: Vec::new(),
+        };
+        let frame = Frame {
+            origin: [0.0, 0.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+        };
+        let b = crate::prism::extrude::extrude_region(&mut k, &frame, &region, 0.0, 120.0).unwrap();
+        let extrusions: Vec<&Surface> = b
+            .face_list()
+            .iter()
+            .filter_map(|&f| b.face(f).ok()?.surface.as_ref())
+            .filter(|s| matches!(s.kind(), SurfaceKind::SurfOfExtrusion(_)))
+            .collect();
+        assert_eq!(extrusions.len(), 1);
+        let mut work = usize::MAX;
+        let along = wall_error(extrusions[0], Vec3::new(0.0, 0.0, 1.0), 120.0, &mut work).unwrap();
+        assert!(along < 1e-9, "{along}");
+        let off = Vec3::new(0.0, 1.0_f64.to_radians().sin(), 1.0_f64.to_radians().cos());
+        let skew = wall_error(extrusions[0], off, 120.0, &mut work).unwrap();
+        // 4 x 120 x sin(1 degree), and the 1024 eps
+        assert!(
+            (skew - 480.0 * 1.0_f64.to_radians().sin()).abs() < 1e-9,
+            "{skew}"
+        );
     }
 }

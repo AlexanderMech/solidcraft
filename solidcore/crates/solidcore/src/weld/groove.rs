@@ -68,10 +68,14 @@
 //!
 //! A concave face is built as asked and returns how deep it dips: below the chord, and below
 //! each plate's outer face where the plates' normal is given (between plates in one plane that
-//! is below the plate's surface: ISO 6520-1 no. 511). Its limit is closed form: the depth where
-//! it first touches another side of the section (a wall, the bottom, the other face), refused
-//! from that depth less the kernel's zone tolerance on ([`WeldFailure::ConcaveFaceCrossesWall`]);
-//! else the half circle, which still builds ([`WeldFailure::ConcaveFaceTooDeep`] past it).
+//! is below the plate's surface: ISO 6520-1 no. 511). Its limit is closed form: the depth `F`
+//! where it first touches another side of the section (a wall, the bottom, the other face);
+//! the deepest that builds is `F - δ`, δ the depth margin (the larger of the section's rounding
+//! allowance and the kernel's zone tolerance), refused past it
+//! ([`WeldFailure::ConcaveFaceCrossesWall`]). With nothing touched, the half circle builds and
+//! deeper is refused ([`WeldFailure::ConcaveFaceTooDeep`]). A face no higher or deeper than the
+//! zone tolerance is built flat ([`GrooveNote::BuiltFlat`]); one past that but shallower than
+//! the smallest arc the profile builds is refused ([`WeldFailure::FaceTooShallow`]).
 //!
 //! # Not covered
 //!
@@ -84,7 +88,9 @@ use crate::error::{Failure, Fit, FitMeasure, Reason, Result, SolidError};
 use crate::kernel::Kernel;
 use crate::math::{Point2, Vec2};
 use crate::prism::path_export::{bulge_arc, Vertex};
-use crate::prism::profile::{check_regions, Loop2, ProfileRefusal, Region2, Seg2};
+use crate::prism::profile::{
+    check_regions, smallest_arc_sweep, Loop2, ProfileRefusal, Region2, Seg2,
+};
 
 pub use crate::error::weld::{WeldFailure, WeldSide};
 
@@ -164,6 +170,14 @@ pub enum GrooveNote {
         /// The depth where the groove opens on the root side (the thinner plate's thickness
         /// where the plates' root sides are flush).
         plate: f64,
+    },
+    /// A face asked for no higher or deeper than the kernel's zone tolerance: built flat (no
+    /// arc builds that shallow).
+    BuiltFlat {
+        /// Which side.
+        side: WeldSide,
+        /// The height or depth asked for.
+        asked: f64,
     },
     /// A concave contour dips below the chord between its toes.
     BelowToes {
@@ -253,7 +267,8 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
         Some(n) => {
             // scaled by its larger part first, so neither its length's overflow nor its
             // underflow matters
-            let n = n * (1.0 / n.x.abs().max(n.y.abs()));
+            let m = n.x.abs().max(n.y.abs());
+            let n = Vec2::new(n.x / m, n.y / m);
             let up = n * (1.0 / n.length());
             if up.dot(chord_up) <= 0.0 {
                 return Err(SolidError::invalid_input(
@@ -337,6 +352,20 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
     }
     // the two faces: what each would be, its own limits first
     let second_used = through && !cut;
+    let zone = k.tolerances.zone_tol_3d;
+    let mut shallow_options = *options;
+    shallow_options.face = shallow(WeldSide::Face, l0, r0, options.face, zone, &mut notes)?;
+    if second_used {
+        shallow_options.second_face = Some(shallow(
+            WeldSide::Second,
+            rb,
+            lb,
+            second(options),
+            zone,
+            &mut notes,
+        )?);
+    }
+    let options = &shallow_options;
     if second_used {
         check_face(
             WeldSide::Second,
@@ -381,20 +410,23 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
         let (fit, contact) = concave_limit(rb, lb, &others, eps);
         limits.push((WeldSide::Second, depth, fit, contact));
     }
-    // a face that touches another side is refused from `fit - delta` on (delta the larger of
-    // the build's rounding and the kernel's zone tolerance); the half circle builds
-    let delta = eps.max(k.tolerances.zone_tol_3d);
-    for &(side, depth, fit, contact) in &limits {
-        let why = if contact && depth >= fit - delta {
-            WeldFailure::ConcaveFaceCrossesWall { side, depth }
-        } else if !contact && depth > fit + eps {
-            WeldFailure::ConcaveFaceTooDeep { side, depth }
+    // delta, the depth margin a face keeps from what it touches: the larger of the section's
+    // rounding allowance (eps, 1e-9 of its size) and the kernel's zone tolerance. The deepest
+    // face that builds is delta short of the touch, at least the zone tolerance (built flat);
+    // with nothing touched it is the half circle, which builds.
+    let delta = eps.max(zone);
+    for &(side, depth, touch, contact) in &limits {
+        let (why, fit) = if contact {
+            let fit = (touch - delta).max(zone);
+            (WeldFailure::ConcaveFaceCrossesWall { side, depth }, fit)
         } else {
-            continue;
+            (WeldFailure::ConcaveFaceTooDeep { side, depth }, touch)
         };
-        return Err(Failure::new(OP, Reason::Weld(why))
-            .with_fit(Fit::new(fit, FitMeasure::Distance, None))
-            .into_error());
+        if depth > fit + if contact { 0.0 } else { eps } {
+            return Err(Failure::new(OP, Reason::Weld(why))
+                .with_fit(Fit::new(fit, FitMeasure::Distance, None))
+                .into_error());
+        }
     }
     if second_used {
         bottom = second_path.ok_or_else(|| unbuilt(WeldSide::Second, rb, lb, second(options)))?;
@@ -427,7 +459,6 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
         outer: Loop2 { segs }.reversed(),
         holes: Vec::new(),
     };
-    let zone = k.tolerances.zone_tol_3d;
     if let Err(refusal) = check_regions(std::iter::once(&region), eps.max(1e-12), zone) {
         return Err(SolidError::invalid_input(
             OP,
@@ -657,6 +688,48 @@ fn closure(p: Point2, q: Point2, contour: Contour) -> Option<Vec<Seg2>> {
 fn sagitta_arc(p: Point2, q: Point2, sagitta: f64) -> Option<Seg2> {
     let bulge = -2.0 * sagitta / (q - p).length();
     bulge_arc(Vertex { at: p, bulge }, q)
+}
+
+/// `check_regions`' bound on an arc's radius.
+// shortcut: copies the literal in `prism::profile::check_regions`; share it if that one moves.
+const ARC_RADIUS_BOUND: f64 = 1e9;
+
+/// A face too shallow for an arc: up to the zone tolerance it is built flat and a note says so;
+/// past it, but below the smallest arc the profile builds (its sweep `4 atan(s / a)` above
+/// `smallest_arc_sweep`, its radius `(a² + s²) / 2s` below the radius bound), it is refused
+/// with that smallest one.
+// shortcut: blended toes are sized as the plain arc; their smaller arcs past that floor are
+// still refused by check_regions as invalid input. Derive their own floor if that shows up.
+fn shallow(
+    side: WeldSide,
+    p: Point2,
+    q: Point2,
+    contour: Contour,
+    zone: f64,
+    notes: &mut Vec<GrooveNote>,
+) -> Result<Contour> {
+    let size = match contour {
+        Contour::Convex { height } | Contour::ConvexBlended { height, .. } => height,
+        Contour::Concave { depth } => depth,
+        Contour::Flat => return Ok(contour),
+    };
+    if size <= zone {
+        notes.push(GrooveNote::BuiltFlat { side, asked: size });
+        return Ok(Contour::Flat);
+    }
+    let a = 0.5 * p.distance(q);
+    let b = ARC_RADIUS_BOUND;
+    let floor = (a * (0.25 * smallest_arc_sweep(f64::MAX, zone)).tan())
+        .max(a * a / (b + (b * b - a * a).max(0.0).sqrt()))
+        * (1.0 + 1e-9);
+    if size < floor {
+        return Err(
+            Failure::new(OP, Reason::Weld(WeldFailure::FaceTooShallow { side, size }))
+                .with_fit(Fit::new(floor, FitMeasure::Distance, None))
+                .into_error(),
+        );
+    }
+    Ok(contour)
 }
 
 /// A face's own limits, before it is built: a convex face no higher than half a circle allows

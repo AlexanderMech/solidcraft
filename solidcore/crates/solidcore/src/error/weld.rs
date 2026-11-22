@@ -10,6 +10,7 @@
 //! |-------------------------------------------|--------------------------|
 //! | [`WeldFailure::ConcaveFaceCrossesWall`]   | `SM_ERR` (no C++)        |
 //! | [`WeldFailure::ConcaveFaceTooDeep`]       | `SM_ERR` (no C++)        |
+//! | [`WeldFailure::FaceTooShallow`]           | `SM_ERR` (no C++)        |
 //! | [`WeldFailure::ConvexFaceTooHigh`]        | `SM_ERR` (no C++)        |
 //! | [`WeldFailure::BlendedToesOffPlane`]      | `SM_ERR` (no C++)        |
 
@@ -30,8 +31,10 @@ pub enum WeldSide {
 #[non_exhaustive]
 pub enum WeldFailure {
     /// A concave face `depth` deep reaches the section's other sides (a groove wall, the other
-    /// face or the bottom). The failure's fit is the depth where the face first touches one,
-    /// in closed form; every depth below it less the kernel's zone tolerance builds.
+    /// face or the bottom). The face first touches one at a depth `F`, in closed form. The
+    /// failure's fit is the deepest that builds: `F - δ`, δ the depth margin (the larger of the
+    /// section's rounding allowance, 1e-9 of its size, and the kernel's zone tolerance), and
+    /// at least the zone tolerance, up to which a face is built flat.
     ConcaveFaceCrossesWall {
         /// Which face.
         side: WeldSide,
@@ -45,6 +48,15 @@ pub enum WeldFailure {
         side: WeldSide,
         /// The depth asked for.
         depth: f64,
+    },
+    /// A face (convex or concave) `size` high or deep: past the kernel's zone tolerance, so
+    /// not built flat, but shallower than the smallest arc the profile builds on its chord.
+    /// The failure's fit is that smallest arc's height.
+    FaceTooShallow {
+        /// Which face.
+        side: WeldSide,
+        /// The height or depth asked for.
+        size: f64,
     },
     /// A convex face `height` high is past half a circle (its main arc's half sweep past a
     /// quarter turn). The failure's fit is the highest that builds: half the toe distance,
@@ -72,6 +84,7 @@ impl WeldFailure {
         match self {
             Self::ConcaveFaceCrossesWall { .. }
             | Self::ConcaveFaceTooDeep { .. }
+            | Self::FaceTooShallow { .. }
             | Self::ConvexFaceTooHigh { .. }
             | Self::BlendedToesOffPlane { .. } => SM_ERR,
         }
@@ -83,6 +96,7 @@ impl WeldFailure {
         match self {
             Self::ConcaveFaceCrossesWall { .. }
             | Self::ConcaveFaceTooDeep { .. }
+            | Self::FaceTooShallow { .. }
             | Self::ConvexFaceTooHigh { .. }
             | Self::BlendedToesOffPlane { .. } => ErrorKind::Unsupported,
         }
@@ -104,6 +118,11 @@ impl core::fmt::Display for WeldFailure {
             Self::ConcaveFaceTooDeep { side, depth } => write!(
                 f,
                 "a concave {} {depth} deep is past half a circle",
+                name(side)
+            ),
+            Self::FaceTooShallow { side, size } => write!(
+                f,
+                "a {} {size} high or deep is too shallow for an arc and past being built flat",
                 name(side)
             ),
             Self::ConvexFaceTooHigh { side, height } => write!(

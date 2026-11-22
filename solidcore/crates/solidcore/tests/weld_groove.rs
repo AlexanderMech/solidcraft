@@ -55,6 +55,10 @@ fn mirror(wall: &[Seg2]) -> Vec<Seg2> {
         .collect()
 }
 
+/// The kernel's default zone tolerance: the depth margin of these sections (their rounding
+/// allowance, 1e-9 of their size, is smaller).
+const ZONE: f64 = 1e-5;
+
 /// One test case: the groove's section and the options it is filled with, flat faces and the
 /// whole groove unless a case says otherwise.
 #[derive(Debug, Clone)]
@@ -483,24 +487,26 @@ fn a_concave_face_across_the_walls_is_refused_with_the_deepest_that_builds() {
             depth: 3.0,
         })
     );
-    // the arc leaves the 60 degree V where its end tangent is steeper than the wall: at
-    // 2 atan(d / a) = 60 degrees, d = a tan 30 (closed form, not searched)
+    // the arc touches the 60 degree V where its end tangent is as steep as the wall: at
+    // 2 atan(d / a) = 60 degrees, F = a tan 30 (closed form, not searched); the deepest that
+    // builds keeps the depth margin, here the zone tolerance, from it
+    let touch = a * tan(30.0);
+    assert!((touch - 2.288_675_134_594_813).abs() < 1e-12);
     let fit = err
         .fit()
         .expect("the refusal says the depth that builds")
         .size;
-    assert!((fit - a * tan(30.0)).abs() < 1e-12, "fit {fit}");
-    assert!((fit - 2.288_675_134_594_813).abs() < 1e-12, "fit {fit}");
+    assert!((fit - (touch - ZONE)).abs() < 1e-12, "fit {fit}");
     let just = |depth: f64| {
         run(&Case {
             face: Contour::Concave { depth },
             ..w.clone()
         })
     };
-    // refused from the touch less the zone tolerance (1e-5) on, built below it
-    assert!(just(fit).is_err());
-    assert!(just(fit - 1e-6).is_err());
-    assert!(just(fit - 2e-5).is_ok());
+    // the fit builds when retried; past it, and at the touch, it is refused
+    assert!(just(fit).is_ok());
+    assert!(just(fit + 1e-9).is_err());
+    assert!(just(touch).is_err());
 }
 
 #[test]
@@ -812,7 +818,11 @@ fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
     }
     // a normal of any length works, the tiny and the huge too, and on plates in one plane
     // changes nothing
-    for n in [Vec2::new(0.0, 1e-200), Vec2::new(0.0, 1e200)] {
+    for n in [
+        Vec2::new(0.0, 1e-200),
+        Vec2::new(0.0, 1e200),
+        Vec2::new(0.0, 1e-310),
+    ] {
         let tiny_or_huge = run(&Case {
             plate_normal: Some(n),
             depth: Some(4.0),
@@ -827,6 +837,13 @@ fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
         .unwrap();
         assert_eq!(tiny_or_huge, unit, "{n:?}");
     }
+    // a subnormal normal tilted by 1e-10 is read as that tilt, not refused
+    assert!(run(&Case {
+        plate_normal: Some(Vec2::new(1e-320, 1e-310)),
+        depth: Some(4.0),
+        ..weld(l.clone(), r.clone())
+    })
+    .is_ok());
     let one_plane = run(&Case {
         plate_normal: Some(Vec2::new(0.0, 3.0)),
         depth: Some(4.0),
@@ -842,9 +859,9 @@ fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
 }
 
 #[test]
-fn a_concave_face_past_half_a_circle_is_refused_with_the_half_circle() {
-    // a square groove 6 wide: its walls stand square to the face, so the deepest concave face
-    // that builds is the half circle, 3 deep
+fn a_concave_face_on_square_walls_is_refused_where_it_touches_them() {
+    // a square groove 6 wide: its walls stand square to the face, so the face touches them at
+    // the half circle, 3 deep, and the deepest that builds keeps the depth margin from that
     let w = Case {
         face: Contour::Concave { depth: 4.0 },
         ..weld(
@@ -864,7 +881,12 @@ fn a_concave_face_past_half_a_circle_is_refused_with_the_half_circle() {
         })
     );
     let fit = err.fit().unwrap().size;
-    assert!((fit - 3.0).abs() < 1e-12, "fit {fit}");
+    assert!((fit - (3.0 - ZONE)).abs() < 1e-12, "fit {fit}");
+    assert!(run(&Case {
+        face: Contour::Concave { depth: fit },
+        ..w
+    })
+    .is_ok());
 }
 
 /// The typed refusal of a weld, and its fit.
@@ -1007,7 +1029,7 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
             depth: 1.5
         }
     );
-    assert!((fit.unwrap() - 1.0).abs() < 1e-12, "{fit:?}");
+    assert!((fit.unwrap() - (1.0 - ZONE)).abs() < 1e-12, "{fit:?}");
     // just short of the touch: still the typed refusal (the crossing check never decides)
     let cut = |depth: f64| Case {
         face: Contour::Concave { depth },
@@ -1019,9 +1041,11 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
         matches!(why, WeldFailure::ConcaveFaceCrossesWall { .. }),
         "{why:?}"
     );
-    assert!((fit.unwrap() - 1.0).abs() < 1e-12);
+    let fit = fit.unwrap();
+    assert!((fit - (1.0 - ZONE)).abs() < 1e-12);
     assert!(run(&cut(1.0)).is_err());
-    assert!(run(&cut(1.0 - 2e-5)).is_ok());
+    assert!(run(&cut(fit)).is_ok());
+    assert!(run(&cut(fit + 1e-9)).is_err());
     // both faces concave on a thin X, each past what builds: a typed refusal, the face first.
     // The second face is past its half circle, so its chord stands in, and the toe decides:
     // a tan 30 with a = 0.5 + tan 30
@@ -1042,7 +1066,10 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
         "{why:?}"
     );
     let fit = fit.unwrap();
-    assert!((fit - 0.622_008_467_928_146_2).abs() < 1e-12, "{fit}");
+    assert!(
+        (fit - (0.622_008_467_928_146_2 - ZONE)).abs() < 1e-12,
+        "{fit}"
+    );
 
     // a square groove 10 wide and 4 deep through the plate: a concave face meets a concave
     // second face 2 high in the middle, at 4 - 2
@@ -1051,7 +1078,7 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
         vec![line(p(5.0, 0.0), p(5.0, -4.0))],
     );
     let (why, fit) = refused(&Case {
-        face: Contour::Concave { depth: 2.5 },
+        face: Contour::Concave { depth: 2.0 },
         second_face: Some(Contour::Concave { depth: 2.0 }),
         ..square.clone()
     });
@@ -1059,12 +1086,13 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
         why,
         WeldFailure::ConcaveFaceCrossesWall {
             side: WeldSide::Face,
-            depth: 2.5
+            depth: 2.0
         }
     );
-    assert!((fit.unwrap() - 2.0).abs() < 1e-12, "{fit:?}");
+    let fit = fit.unwrap();
+    assert!((fit - (2.0 - ZONE)).abs() < 1e-12, "{fit}");
     assert!(run(&Case {
-        face: Contour::Concave { depth: 2.0 - 2e-5 },
+        face: Contour::Concave { depth: fit },
         second_face: Some(Contour::Concave { depth: 2.0 }),
         ..square.clone()
     })
@@ -1082,8 +1110,10 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
             depth: 4.0
         }
     );
-    assert!((fit.unwrap() - 4.0).abs() < 1e-12, "{fit:?}");
-    assert!(run(&second(4.0 - 2e-5)).is_ok());
+    let fit = fit.unwrap();
+    assert!((fit - (4.0 - ZONE)).abs() < 1e-12, "{fit}");
+    assert!(run(&second(fit)).is_ok());
+    assert!(run(&second(fit + 1e-9)).is_err());
 }
 
 #[test]
@@ -1108,4 +1138,97 @@ fn a_concave_face_that_touches_nothing_builds_up_to_its_half_circle() {
         }
     );
     assert!((fit.unwrap() - 3.0).abs() < 1e-12, "{fit:?}");
+}
+
+#[test]
+fn a_face_shallower_than_any_arc_is_built_flat_or_refused_with_the_smallest_arc() {
+    let (l, r) = v_walls(6.0, 60.0, 0.0);
+    let flat = area(&weld(l.clone(), r.clone()));
+    // within the zone tolerance: built flat, and the note says so
+    for depth in [1e-300, 1e-12, 1e-9, ZONE] {
+        let w = Case {
+            face: Contour::Concave { depth },
+            ..weld(l.clone(), r.clone())
+        };
+        let got = section(&w);
+        assert_eq!(area(&w), flat, "{depth}");
+        assert_eq!(
+            got.notes,
+            vec![GrooveNote::BuiltFlat {
+                side: WeldSide::Face,
+                asked: depth
+            }]
+        );
+    }
+    // a groove 2000 wide: no arc of radius 1e9 or more builds, so past the zone tolerance
+    // and below a^2 / 2e9 (5e-4) the face is refused, with that smallest arc
+    let wide = weld(
+        vec![line(p(-1000.0, 0.0), p(-999.0, -6.0))],
+        vec![line(p(1000.0, 0.0), p(999.0, -6.0))],
+    );
+    for face in [
+        Contour::Concave { depth: 1e-4 },
+        Contour::Convex { height: 1e-4 },
+    ] {
+        let (why, fit) = refused(&Case {
+            face,
+            ..wide.clone()
+        });
+        assert_eq!(
+            why,
+            WeldFailure::FaceTooShallow {
+                side: WeldSide::Face,
+                size: 1e-4
+            }
+        );
+        let fit = fit.unwrap();
+        assert!((fit - 5e-4).abs() < 1e-9, "{fit}");
+        let at_fit = match face {
+            Contour::Concave { .. } => Contour::Concave { depth: fit },
+            _ => Contour::Convex { height: fit },
+        };
+        assert!(run(&Case {
+            face: at_fit,
+            ..wide.clone()
+        })
+        .is_ok());
+    }
+}
+
+#[test]
+fn the_fit_of_a_convex_face_builds_when_retried() {
+    let (l, r) = v_walls(6.0, 60.0, 0.0);
+    let flat = Case {
+        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        ..weld(l, r)
+    };
+    for face in [
+        Contour::Convex { height: 9.0 },
+        Contour::ConvexBlended {
+            height: 9.0,
+            overlap: 1.0,
+        },
+    ] {
+        let (_, fit) = refused(&Case {
+            face,
+            ..flat.clone()
+        });
+        let retry = match face {
+            Contour::Convex { .. } => Contour::Convex {
+                height: fit.unwrap(),
+            },
+            _ => Contour::ConvexBlended {
+                height: fit.unwrap(),
+                overlap: 1.0,
+            },
+        };
+        assert!(
+            run(&Case {
+                face: retry,
+                ..flat.clone()
+            })
+            .is_ok(),
+            "{face:?}"
+        );
+    }
 }

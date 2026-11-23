@@ -1013,6 +1013,19 @@ fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
     );
 }
 
+/// How far `fill` grows each side towards a concave face: twice the crossing check's
+/// near-miss tolerance, 100 times the conservative allowance (1e-9 of the section's size, its
+/// largest coordinate and at least 1).
+fn grown(c: &Case) -> f64 {
+    let size = c
+        .left
+        .iter()
+        .chain(&c.right)
+        .flat_map(|s| [s.start(), s.end()])
+        .fold(1.0_f64, |m, q| m.max(q.x.abs()).max(q.y.abs()));
+    2.0 * 100.0 * 1e-9 * size
+}
+
 #[test]
 fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
     let (l, r) = v_walls(6.0, 60.0, 0.0);
@@ -1029,7 +1042,10 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
             depth: 1.5
         }
     );
-    assert!((fit.unwrap() - (1.0 - ZONE)).abs() < 1e-12, "{fit:?}");
+    // the lowest point meets the cut line, grown towards it: the dip falls by the growth
+    let (vl, vr) = v_walls(6.0, 60.0, 0.0);
+    let off = grown(&weld(vl, vr));
+    assert!((fit.unwrap() - (1.0 - off - ZONE)).abs() < 1e-12, "{fit:?}");
     // just short of the touch: still the typed refusal (the crossing check never decides)
     let cut = |depth: f64| Case {
         face: Contour::Concave { depth },
@@ -1042,7 +1058,7 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
         "{why:?}"
     );
     let fit = fit.unwrap();
-    assert!((fit - (1.0 - ZONE)).abs() < 1e-12);
+    assert!((fit - (1.0 - off - ZONE)).abs() < 1e-12);
     assert!(run(&cut(1.0)).is_err());
     assert!(run(&cut(fit)).is_ok());
     assert!(run(&cut(fit + 1e-9)).is_err());
@@ -1090,7 +1106,8 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
         }
     );
     let fit = fit.unwrap();
-    assert!((fit - (2.0 - ZONE)).abs() < 1e-12, "{fit}");
+    let off = grown(&square);
+    assert!((fit - (2.0 - off - ZONE)).abs() < 1e-12, "{fit}");
     assert!(run(&Case {
         face: Contour::Concave { depth: fit },
         second_face: Some(Contour::Concave { depth: 2.0 }),
@@ -1111,7 +1128,7 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
         }
     );
     let fit = fit.unwrap();
-    assert!((fit - (4.0 - ZONE)).abs() < 1e-12, "{fit}");
+    assert!((fit - (4.0 - off - ZONE)).abs() < 1e-12, "{fit}");
     assert!(run(&second(fit)).is_ok());
     assert!(run(&second(fit + 1e-9)).is_err());
 }
@@ -1404,6 +1421,42 @@ fn a_concave_fit_against_a_wall_builds_on_a_large_section() {
     assert_eq!(tries, 1);
 }
 
+/// The right wall of a groove with a step just under the toe: (1, 0) to (1, -0.001), in to
+/// (0.9, -0.0015), down to (0.9, -2).
+fn step_wall() -> Vec<Seg2> {
+    vec![
+        line(p(1.0, 0.0), p(1.0, -0.001)),
+        line(p(1.0, -0.001), p(0.9, -0.0015)),
+        line(p(0.9, -0.0015), p(0.9, -2.0)),
+    ]
+}
+
+#[test]
+fn a_concave_fit_against_a_step_in_the_wall_builds_on_every_scale() {
+    for f in [1.0, 10.0, 100.0, 1e3, 1e4] {
+        let right: Vec<Seg2> = step_wall()
+            .iter()
+            .map(|s| {
+                line(
+                    p(s.start().x * f, s.start().y * f),
+                    p(s.end().x * f, s.end().y * f),
+                )
+            })
+            .collect();
+        let w = Case {
+            face: Contour::Concave { depth: 0.5 * f },
+            ..weld(mirror(&right), right)
+        };
+        let (why, _) = refused(&w);
+        assert!(
+            matches!(why, WeldFailure::ConcaveFaceCrossesWall { .. }),
+            "{f}: {why:?}"
+        );
+        let (_, tries) = retry_until_built(w, |d| Contour::Concave { depth: d });
+        assert_eq!(tries, 1, "{f}");
+    }
+}
+
 #[test]
 fn concave_fits_build_when_retried_on_every_scale() {
     // V walls of several slopes, a square groove and the U groove, from 1 to 1e5 wide, each
@@ -1449,17 +1502,23 @@ fn concave_fits_build_when_retried_on_every_scale() {
                         depth,
                         ..weld(mirror(&right), right.clone())
                     };
+                    let mut built = false;
                     for _ in 0..3 {
                         match run(&w) {
-                            Ok(_) => break,
+                            Ok(_) => {
+                                built = true;
+                                break;
+                            }
                             Err(err) => {
                                 let Some(fit) = err.fit() else {
-                                    refused_fits.push((f, want, depth, err));
                                     break;
                                 };
                                 w.face = Contour::Concave { depth: fit.size };
                             }
                         }
+                    }
+                    if !built {
+                        refused_fits.push((f, want, depth, run(&w).err()));
                     }
                 }
             }

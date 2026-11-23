@@ -409,15 +409,14 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
         let (fit, contact) = concave_limit(rb, lb, &others, eps);
         limits.push((WeldSide::Second, depth, fit, contact, second_floor));
     }
-    // delta, the depth margin a face keeps from what it touches: the larger of the kernel's
-    // zone tolerance and twice the near-miss tolerance of the crossing check (100 eps, eps
-    // being the conservative allowance, 1e-9 of the section's size), so a face at its fit
-    // stays clear of that check on any scale. A concave
+    // delta, the depth margin a face keeps from what it touches (each side grown by twice the
+    // crossing check's near-miss tolerance, in concave_limit): the larger of the section's
+    // conservative allowance (eps, 1e-9 of its size) and the kernel's zone tolerance. A concave
     // face builds from its arc floor up to delta short of the touch (with nothing touched, up
     // to the half circle, which builds). Outside that, its fit is the nearest size that
     // builds: the floor below it, the deepest past it, the zone tolerance (built flat) where
     // the deepest is below the floor. Every fit builds when retried.
-    let delta = zone.max(2.0 * near_miss(eps));
+    let delta = eps.max(zone);
     for &(side, depth, touch, contact, floor) in &limits {
         let (upper, slack) = if contact {
             (touch - delta, 0.0)
@@ -815,13 +814,16 @@ fn unbuilt(side: WeldSide, p: Point2, q: Point2, contour: Contour) -> SolidError
 }
 
 /// The depth where a concave arc from `p` to `q` (dipping on the right of the run) first
-/// touches one of `others`, and whether it does (`false`: none is touched up to the half
-/// circle, half the chord, which is then the limit). Closed form: the arcs through `p`
-/// and `q` are a pencil of circles, each deeper one below the one before, so the first that
-/// touches a side does so at one of its ends or where it is tangent to it. The circle of dip
-/// `s` has its centre `m + n (R - s)`, `R = (a² + s²) / 2s` (`m` the chord's middle, `a` half
-/// of it, `n` its normal on the outside); tangency with a line or a circle is a quadratic in
-/// `s`, a point's circle is direct.
+/// comes within the crossing check's reach of one of `others`, and whether it does (`false`:
+/// none is touched up to the half circle, half the chord, which is then the limit). Each side
+/// is grown towards the arcs by twice the near-miss tolerance, so an arc short of the limit is
+/// never flagged by the crossing check; a side leaving a toe is met at its toe angle, as it is
+/// (a shallower arc's circle meets it again only behind the toe). Closed form: the arcs
+/// through `p` and `q` are a pencil of circles, each deeper one below the one before, so the
+/// first that reaches a grown side does so at a vertex's circle or where it is tangent to the
+/// side. The circle of dip `s` has its centre `m + n (R - s)`, `R = (a² + s²) / 2s` (`m` the
+/// chord's middle, `a` half of it, `n` its normal on the outside); tangency with a line or a
+/// circle is a quadratic in `s`.
 fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool) {
     let chord = q - p;
     let a = 0.5 * chord.length();
@@ -835,6 +837,9 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool)
     // within the arcs' reach: below the chord, between the toes
     let inside = |x: Point2| (x - m).dot(n) <= eps && (x - m).dot(e).abs() <= a + eps;
     let tol = near_miss(eps);
+    // every side grown towards the arcs by twice that: the crossing check flags a miss up to
+    // it (an outside miss between circles up to 2 tol, line and inside misses up to tol)
+    let off = 2.0 * tol;
     let (mut best, mut contact) = (a, false);
     let mut take = |s: f64| {
         if s > 0.0 && s <= best {
@@ -864,10 +869,14 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool)
             if x.distance(p).min(x.distance(q)) <= eps || under >= -eps || v.dot(e).abs() >= a {
                 continue;
             }
-            let h = (v.dot(v) - a * a) / (2.0 * under);
-            // R - h, without the cancellation of the difference when h is large
-            let r = (a * a + h * h).sqrt();
-            take(if h > 0.0 { a * a / (r + h) } else { r - h });
+            // the first arc within `off` of the vertex: centre distance R + off
+            let w = m - x;
+            let wn = w.dot(n);
+            for s in roots(-wn - off, w.dot(w) - a * a - off * off, (wn - off) * a * a) {
+                if s > eps && s <= a + eps {
+                    take(s);
+                }
+            }
         }
         match *seg {
             Seg2::Line { a: l0, b: l1 } => {
@@ -880,7 +889,9 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool)
                 let ln = left_normal(t);
                 let (g, k) = ((m - l0).dot(ln), n.dot(ln));
                 for sigma in [1.0, -1.0] {
-                    // g + k (R - s) = sigma R, times 2s
+                    // the line moved `off` towards the arc: g + k (R - s) = sigma (R + off),
+                    // that is (g - sigma off) + k (R - s) = sigma R, times 2s
+                    let g = g - sigma * off;
                     for s in roots(-k - sigma, 2.0 * g, (k - sigma) * a * a) {
                         if s <= eps || s > a + eps {
                             continue;
@@ -897,17 +908,28 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool)
             Seg2::Arc { center, radius, .. } => {
                 let w = m - center;
                 let wn = w.dot(n);
-                for sigma in [1.0, -1.0] {
-                    // |c - center| = R + sigma radius, squared, times 2s
+                // the side grown towards the arc: outside it, its radius grows by `off`
+                // (|c - center| = R + radius + off); inside it, the side's circle grows if the
+                // arc's circle holds it (R - radius - off) and shrinks if it holds the arc's
+                // circle (radius - off - R). Never shrunk otherwise: that would add roots.
+                for (sigma, grown, holds) in [
+                    (1.0, radius + off, None),
+                    (-1.0, radius + off, Some(false)),
+                    (-1.0, radius - off, Some(true)),
+                ] {
+                    // |c - center| = R + sigma grown, squared, times 2s
                     for s in roots(
-                        -wn - sigma * radius,
-                        w.dot(w) - a * a - radius * radius,
-                        (wn - sigma * radius) * a * a,
+                        -wn - sigma * grown,
+                        w.dot(w) - a * a - grown * grown,
+                        (wn - sigma * grown) * a * a,
                     ) {
-                        if s <= eps || s > a + eps {
+                        if s <= eps || s > a + eps || grown <= 0.0 {
                             continue;
                         }
                         let (c, r) = circle(s);
+                        if holds.is_some_and(|h| h != (radius > r)) {
+                            continue;
+                        }
                         let span = c - center;
                         let dist = span.length();
                         if dist <= eps {

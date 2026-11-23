@@ -31,7 +31,9 @@ pub enum WeldSide {
 #[non_exhaustive]
 pub enum WeldFailure {
     /// A concave face `depth` deep reaches the section's other sides (a groove wall, the other
-    /// face or the bottom). The face first touches one at a depth `F`, in closed form. The
+    /// face or the bottom). The face first touches one at a depth `F`, in closed form, each
+    /// side grown towards it by twice the crossing check's near-miss tolerance (100 times the
+    /// section's conservative allowance). The
     /// failure's fit is the deepest that builds: `F - δ`, δ the depth margin (the larger of the
     /// section's conservative allowance, 1e-9 of its size, and the kernel's zone tolerance), where
     /// that reaches the smallest arc the profile builds; else the zone tolerance, up to which a

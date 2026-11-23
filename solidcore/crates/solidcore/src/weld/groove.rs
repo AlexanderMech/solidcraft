@@ -412,8 +412,9 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
     // delta, the depth margin a face keeps from what it touches: the larger of the section's
     // conservative allowance (eps, 1e-9 of its size) and the kernel's zone tolerance. A concave
     // face builds from its arc floor up to delta short of the touch (with nothing touched, up
-    // to the half circle, which builds). Outside that, its fit is that deepest if it reaches
-    // the floor, else the zone tolerance (built flat): every fit builds when retried.
+    // to the half circle, which builds). Outside that, its fit is the nearest size that
+    // builds: the floor below it, the deepest past it, the zone tolerance (built flat) where
+    // the deepest is below the floor. Every fit builds when retried.
     let delta = eps.max(zone);
     for &(side, depth, touch, contact, floor) in &limits {
         let (upper, slack) = if contact {
@@ -431,7 +432,13 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
         } else {
             WeldFailure::ConcaveFaceTooDeep { side, depth }
         };
-        let fit = if upper >= floor { upper } else { zone };
+        let fit = if upper < floor {
+            zone
+        } else if depth < floor {
+            floor
+        } else {
+            upper
+        };
         return Err(Failure::new(OP, Reason::Weld(why))
             .with_fit(Fit::new(fit, FitMeasure::Distance, None))
             .into_error());
@@ -446,17 +453,14 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
     segs.extend(right_wall.iter().copied());
     segs.extend(bottom.clone());
     segs.extend(left_wall.iter().rev().map(Seg2::reversed));
-    // the input check on the walls: each face, sized above, stands in as its chord (a convex
-    // face and its blended toes lie outside the chord, a concave one within its limit)
-    let mut check = vec![Seg2::Line { a: l0, b: r0 }];
-    check.extend(right_wall.iter().copied());
-    if second_used {
-        check.push(Seg2::Line { a: rb, b: lb });
-    } else {
-        check.extend(bottom.iter().copied());
-    }
-    check.extend(left_wall.iter().rev().map(Seg2::reversed));
-    if crosses(&check, eps.max(1e-12) * 100.0) {
+    // the input check: no two sides of the loop cross. A face's own pieces are not checked
+    // against each other (they are built to meet); each face is checked against the walls,
+    // the bottom and the other face.
+    let mut group = vec![1; face.len()];
+    group.extend(right_wall.iter().map(|_| 0));
+    group.extend(bottom.iter().map(|_| if second_used { 2 } else { 0 }));
+    group.extend(left_wall.iter().map(|_| 0));
+    if crosses(&segs, &group, eps.max(1e-12) * 100.0) {
         return Err(SolidError::invalid_input(
             OP,
             "a section that crosses itself (walls that cross)",
@@ -703,7 +707,8 @@ fn sagitta_arc(p: Point2, q: Point2, sagitta: f64) -> Option<Seg2> {
 /// what it touches. The floor is the height at which the face's smallest arc sweeps more than
 /// `smallest_arc_sweep` and its largest radius is below `MAX_ARC_RADIUS`: with `x = a + o`
 /// (`o = 0` but for blended toes), the main arc sweeps `4 atan(h / x)` and each blend arc half
-/// that, and the main arc's radius is `a (x² + h²) / 2hx`. The floor uses the sweep bound for
+/// that, the main arc's radius is `a (x² + h²) / 2hx` and a blend arc's `o (x² + h²) / 2hx`:
+/// the largest uses `m = max(a, o)`. The floor uses the sweep bound for
 /// an infinite radius, dropping `smallest_arc_sweep`'s `zone / R` term: the sweep exceeds that
 /// term for any `a > zone / 2`. The `(1 + 1e-9)` keeps a conservative allowance above it.
 fn shallow(
@@ -726,10 +731,11 @@ fn shallow(
     }
     let a = 0.5 * p.distance(q);
     let x = a + overlap;
+    let m = a.max(overlap);
     let b = MAX_ARC_RADIUS;
     let turn = if overlap > 0.0 { 0.5 } else { 0.25 };
     let floor = (x * (turn * smallest_arc_sweep(f64::MAX, zone)).tan())
-        .max(x * a / (b + (b * b - a * a).max(0.0).sqrt()))
+        .max(x * m / (b + (b * b - m * m).max(0.0).sqrt()))
         * (1.0 + 1e-9);
     if size < floor && !matches!(contour, Contour::Concave { .. }) {
         return Err(
@@ -1074,17 +1080,40 @@ fn part(seg: &Seg2, t: f64) -> Seg2 {
 }
 
 /// Whether the closed loop `segs` crosses or touches itself anywhere but where neighbours
-/// join (`tol` round each join is not looked at).
-fn crosses(segs: &[Seg2], tol: f64) -> bool {
-    let n = segs.len();
+/// join (`tol` round each join is not looked at). Neighbouring segments of one nonzero
+/// `group` (a face's pieces) are one side: they are not checked against each other, and the
+/// side joins its neighbours at its own ends.
+fn crosses(segs: &[Seg2], group: &[usize], tol: f64) -> bool {
+    // each segment's side, and each side's two ends
+    let mut side = Vec::with_capacity(segs.len());
+    let mut ends: Vec<(Point2, Point2)> = Vec::new();
+    for (i, s) in segs.iter().enumerate() {
+        let g = group.get(i).copied().unwrap_or(0);
+        let joined = i > 0 && g != 0 && group.get(i - 1) == Some(&g);
+        match ends.last_mut() {
+            Some(last) if joined => last.1 = s.end(),
+            _ => ends.push((s.start(), s.end())),
+        }
+        side.push(ends.len() - 1);
+    }
+    let n = ends.len();
     for (i, a) in segs.iter().enumerate() {
         for (j, b) in segs.iter().enumerate().skip(i + 1) {
-            let next = j == i + 1;
-            let wrap = i == 0 && j + 1 == n;
+            let (Some(&u), Some(&v)) = (side.get(i), side.get(j)) else {
+                continue;
+            };
+            let Some(&(start, end)) = ends.get(u) else {
+                continue;
+            };
+            if u == v {
+                continue;
+            }
+            let next = v == u + 1;
+            let wrap = u == 0 && v + 1 == n;
             let joins: Vec<Point2> = match (next, wrap) {
-                (true, true) => vec![a.end(), a.start()],
-                (true, false) => vec![a.end()],
-                (false, true) => vec![a.start()],
+                (true, true) => vec![end, start],
+                (true, false) => vec![end],
+                (false, true) => vec![start],
                 (false, false) => Vec::new(),
             };
             if meets(a, b, tol)

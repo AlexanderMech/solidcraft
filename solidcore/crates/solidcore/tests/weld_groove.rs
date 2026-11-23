@@ -1161,7 +1161,8 @@ fn a_face_shallower_than_any_arc_is_built_flat_or_refused_with_the_smallest_arc(
         );
     }
     // a groove 2000 wide: no arc of radius 1e9 or more builds, so past the zone tolerance
-    // and below a^2 / 2e9 (5e-4) the face is refused, with that smallest arc
+    // and below a^2 / 2e9 (5e-4) the face is refused, with that smallest arc (for a concave
+    // face too: it is nearer than the deepest that builds)
     let wide = weld(
         vec![line(p(-1000.0, 0.0), p(-999.0, -6.0))],
         vec![line(p(1000.0, 0.0), p(999.0, -6.0))],
@@ -1181,13 +1182,9 @@ fn a_face_shallower_than_any_arc_is_built_flat_or_refused_with_the_smallest_arc(
                 size: 1e-4
             }
         );
-        // the fit builds: the smallest arc for a convex face, the deepest that builds for a
-        // concave one (here far deeper, short of the walls)
+        // the fit is the nearest size that builds: the smallest arc, for either face
         let fit = fit.unwrap();
-        match face {
-            Contour::Concave { .. } => assert!(fit > 5e-4, "{fit}"),
-            _ => assert!((fit - 5e-4).abs() < 1e-9, "{fit}"),
-        }
+        assert!((fit - 5e-4).abs() < 1e-9, "{fit}");
         let at_fit = match face {
             Contour::Concave { .. } => Contour::Concave { depth: fit },
             _ => Contour::Convex { height: fit },
@@ -1236,6 +1233,36 @@ fn the_fit_of_a_convex_face_builds_when_retried() {
             "{face:?}"
         );
     }
+}
+
+#[test]
+fn a_face_is_checked_against_the_walls_as_built_not_as_its_chord() {
+    // walls that lean out over the plates before running down to the root
+    let over = |corner: Point2| {
+        let left = vec![line(p(-5.0, 0.0), corner), line(corner, p(-1.0, -6.0))];
+        let right = mirror(&left);
+        Case {
+            plate_normal: Some(Vec2::new(0.0, 1.0)),
+            ..weld(left, right)
+        }
+    };
+    // a blended toe runs out under the wall's overhang and crosses it: refused
+    let err = run(&Case {
+        face: Contour::ConvexBlended {
+            height: 0.5,
+            overlap: 1.0,
+        },
+        ..over(p(-5.5, 0.3))
+    })
+    .unwrap_err();
+    assert!(matches!(err, SolidError::InvalidInput { .. }), "{err:?}");
+    // a convex face that clears the walls' inner corners builds, though its chord crosses
+    // the walls
+    assert!(run(&Case {
+        face: Contour::Convex { height: 3.0 },
+        ..over(p(-3.0, 2.0))
+    })
+    .is_ok());
 }
 
 /// Retries a refused weld at its fit until it builds (at most three times): the last weld.
@@ -1328,6 +1355,29 @@ fn shallow_blended_toes_build_or_are_refused_with_a_fit_that_builds() {
         |h| Contour::ConvexBlended {
             height: h,
             overlap: 1.0,
+        },
+    );
+    assert_eq!(tries, 1);
+    // an overlap longer than half the groove: the blend arcs are the largest (radius
+    // o (x² + h²) / 2hx), so the floor is x o / 2e9 (7.5e-4 here), and its retry builds
+    let wide_blend = |height: f64| Contour::ConvexBlended {
+        height,
+        overlap: 1000.0,
+    };
+    let (_, fit) = refused(&Case {
+        face: wide_blend(1e-4),
+        ..groove(500.0)
+    });
+    let fit = fit.unwrap();
+    assert!((fit - 1500.0 * 1000.0 / 2e9).abs() < 1e-9, "{fit}");
+    let (_, tries) = retry_until_built(
+        Case {
+            face: wide_blend(1e-4),
+            ..groove(500.0)
+        },
+        |h| Contour::ConvexBlended {
+            height: h,
+            overlap: 1000.0,
         },
     );
     assert_eq!(tries, 1);

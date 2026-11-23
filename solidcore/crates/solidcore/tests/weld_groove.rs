@@ -1382,3 +1382,88 @@ fn shallow_blended_toes_build_or_are_refused_with_a_fit_that_builds() {
     );
     assert_eq!(tries, 1);
 }
+
+#[test]
+fn a_concave_fit_against_a_wall_builds_on_a_large_section() {
+    // a groove 200 wide, filled 2 deep: the concave face asked for touches the walls away from
+    // the toes; its fit stays clear of the walls by more than the crossing check's tolerance
+    let w = Case {
+        face: Contour::Concave { depth: 3.0 },
+        depth: Some(2.0),
+        ..weld(
+            vec![line(p(-100.0, 0.0), p(-99.0, -200.0))],
+            vec![line(p(100.0, 0.0), p(99.0, -200.0))],
+        )
+    };
+    let (why, _) = refused(&w);
+    assert!(
+        matches!(why, WeldFailure::ConcaveFaceCrossesWall { .. }),
+        "{why:?}"
+    );
+    let (_, tries) = retry_until_built(w, |d| Contour::Concave { depth: d });
+    assert_eq!(tries, 1);
+}
+
+#[test]
+fn concave_fits_build_when_retried_on_every_scale() {
+    // V walls of several slopes, a square groove and the U groove, from 1 to 1e5 wide, each
+    // asked for concave faces that reach past what they touch: every refusal's fit builds
+    let grow = |wall: Vec<Seg2>, f: f64| -> Vec<Seg2> {
+        wall.into_iter()
+            .map(|s| match s {
+                Seg2::Line { a, b } => line(p(a.x * f, a.y * f), p(b.x * f, b.y * f)),
+                Seg2::Arc {
+                    center,
+                    radius,
+                    start,
+                    sweep,
+                } => Seg2::Arc {
+                    center: p(center.x * f, center.y * f),
+                    radius: radius * f,
+                    start,
+                    sweep,
+                },
+                other => other,
+            })
+            .collect()
+    };
+    let mut refused_fits = Vec::new();
+    for f in [1.0, 10.0, 100.0, 1e3, 1e4, 1e5] {
+        let mut walls = vec![u_right(), vec![line(p(3.0, 0.0), p(3.0, -6.0))]];
+        for (dx, dy) in [
+            (0.01, -0.02),
+            (0.01, -2.0),
+            (0.001, -0.01),
+            (-0.01, -0.03),
+            (0.05, -0.01),
+        ] {
+            walls.push(vec![line(p(1.0, 0.0), p(1.0 - dx, dy))]);
+        }
+        for right in walls {
+            let right = grow(right, f);
+            let top = right.first().map_or(f, |s| s.start().x);
+            for want in [0.5, 0.9, 2.0] {
+                for depth in [None, Some(0.02 * top), Some(0.5 * top)] {
+                    let mut w = Case {
+                        face: Contour::Concave { depth: want * top },
+                        depth,
+                        ..weld(mirror(&right), right.clone())
+                    };
+                    for _ in 0..3 {
+                        match run(&w) {
+                            Ok(_) => break,
+                            Err(err) => {
+                                let Some(fit) = err.fit() else {
+                                    refused_fits.push((f, want, depth, err));
+                                    break;
+                                };
+                                w.face = Contour::Concave { depth: fit.size };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(refused_fits.is_empty(), "{refused_fits:?}");
+}

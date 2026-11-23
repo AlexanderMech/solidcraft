@@ -409,13 +409,15 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
         let (fit, contact) = concave_limit(rb, lb, &others, eps);
         limits.push((WeldSide::Second, depth, fit, contact, second_floor));
     }
-    // delta, the depth margin a face keeps from what it touches: the larger of the section's
-    // conservative allowance (eps, 1e-9 of its size) and the kernel's zone tolerance. A concave
+    // delta, the depth margin a face keeps from what it touches: the larger of the kernel's
+    // zone tolerance and twice the near-miss tolerance of the crossing check (100 eps, eps
+    // being the conservative allowance, 1e-9 of the section's size), so a face at its fit
+    // stays clear of that check on any scale. A concave
     // face builds from its arc floor up to delta short of the touch (with nothing touched, up
     // to the half circle, which builds). Outside that, its fit is the nearest size that
     // builds: the floor below it, the deepest past it, the zone tolerance (built flat) where
     // the deepest is below the floor. Every fit builds when retried.
-    let delta = eps.max(zone);
+    let delta = zone.max(2.0 * near_miss(eps));
     for &(side, depth, touch, contact, floor) in &limits {
         let (upper, slack) = if contact {
             (touch - delta, 0.0)
@@ -460,7 +462,7 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
     group.extend(right_wall.iter().map(|_| 0));
     group.extend(bottom.iter().map(|_| if second_used { 2 } else { 0 }));
     group.extend(left_wall.iter().map(|_| 0));
-    if crosses(&segs, &group, eps.max(1e-12) * 100.0) {
+    if crosses(&segs, &group, near_miss(eps)) {
         return Err(SolidError::invalid_input(
             OP,
             "a section that crosses itself (walls that cross)",
@@ -832,7 +834,7 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool)
     };
     // within the arcs' reach: below the chord, between the toes
     let inside = |x: Point2| (x - m).dot(n) <= eps && (x - m).dot(e).abs() <= a + eps;
-    let tol = eps.max(1e-12) * 100.0;
+    let tol = near_miss(eps);
     let (mut best, mut contact) = (a, false);
     let mut take = |s: f64| {
         if s > 0.0 && s <= best {
@@ -1077,6 +1079,11 @@ fn part(seg: &Seg2, t: f64) -> Seg2 {
         },
         other => other,
     }
+}
+
+/// The near-miss tolerance of the crossing check: two sides closer than this meet.
+fn near_miss(eps: f64) -> f64 {
+    eps.max(1e-12) * 100.0
 }
 
 /// Whether the closed loop `segs` crosses or touches itself anywhere but where neighbours

@@ -2,10 +2,12 @@
 //! groove, the same chain whatever the order of the picks, the parts only read, and every typed
 //! refusal of picks that are not one chain from the toe; the joint's frame on both grooves, the
 //! same whatever the order of the picks, mirrored when the parts swap, and a plate not straight
-//! along the joint refused. Ported from the second groove PR's first slice (solidcore
+//! along the joint refused; the weld filling a Y groove flat (its volume in closed form), a fill
+//! the groove cannot take refused with the size that builds, and parts of different length
+//! refused. Ported from the second groove PR's first slice (solidcore
 //! `weld::groove::joint`, never pushed) onto ops reads (#18500).
 
-use solidcore_ops::prism::extrude_planar_regions;
+use solidcore_ops::prism::{Contour, extrude_planar_regions};
 use solidcore_ops::{Body, Order};
 use solidcore_record::{Loop2, Plane, Region2, Vec2, Vec3};
 
@@ -18,9 +20,14 @@ fn plate(corners: &[(f64, f64)]) -> (Body, Order) {
 
 /// The polygon `corners` in `plane`, swept 120 along its normal, and its order.
 fn swept(plane: &Plane, corners: &[(f64, f64)]) -> (Body, Order) {
+    swept_by(plane, corners, 120.0)
+}
+
+/// The polygon `corners` in `plane`, swept `length` along its normal, and its order.
+fn swept_by(plane: &Plane, corners: &[(f64, f64)], length: f64) -> (Body, Order) {
     let pts: Vec<Vec2> = corners.iter().map(|&(x, y)| Vec2::new(x, y)).collect();
     let region = Region2 { outer: Loop2::polygon(&pts), holes: Vec::new() };
-    let body = extrude_planar_regions(plane, &[region], 0.0, 120.0).unwrap();
+    let body = extrude_planar_regions(plane, &[region], 0.0, length).unwrap();
     let (_, order) = body.to_record().unwrap();
     (body, order)
 }
@@ -42,10 +49,15 @@ const UP: [f64; 3] = [0.0, 1.0, 0.0];
 /// A 60° V with a root face 1 and a gap 1 on 8 mm plates: the left and right plates, and each
 /// one's groove faces (bevel, then root face).
 fn y_groove() -> ([(Body, Order); 2], [Vec<usize>; 2]) {
+    y_groove_of(120.0)
+}
+
+/// [`y_groove`] with the right plate `length` long (the left one 120).
+fn y_groove_of(length: f64) -> ([(Body, Order); 2], [Vec<usize>; 2]) {
     let t = 30.0_f64.to_radians().tan();
     let top = 0.5 + 7.0 * t;
     let left = plate(&[(-40.0, 0.0), (-40.0, -8.0), (-0.5, -8.0), (-0.5, -7.0), (-top, 0.0)]);
-    let right = plate(&[(top, 0.0), (0.5, -7.0), (0.5, -8.0), (40.0, -8.0), (40.0, 0.0)]);
+    let right = swept_by(&Plane::XY, &[(top, 0.0), (0.5, -7.0), (0.5, -8.0), (40.0, -8.0), (40.0, 0.0)], length);
     let lf = [facing(&left, unit(1.0, t)), facing(&left, [1.0, 0.0, 0.0])].concat();
     let rf = [facing(&right, unit(-1.0, t)), facing(&right, [-1.0, 0.0, 0.0])].concat();
     assert_eq!((lf.len(), rf.len()), (2, 2), "{lf:?} {rf:?}");
@@ -189,4 +201,52 @@ fn a_plate_not_straight_along_the_joint_is_refused() {
     assert_eq!((lf.len(), rf.len()), (1, 1));
     let got = joint(&[left, right], [&lf, &rf]).unwrap_err();
     assert!(matches!(got, GrooveRefusal::GrooveFaceNotStraight { .. }), "{got:?}");
+}
+
+// ---- the weld ----
+
+fn flat() -> FillOptions {
+    FillOptions { face: Contour::Flat, second_face: None, depth: None }
+}
+
+fn weld(parts: &[(Body, Order); 2], faces: &[Vec<usize>; 2], options: &FillOptions) -> Result<GrooveWeld> {
+    groove_weld([&pick(&parts[0], &faces[0]), &pick(&parts[1], &faces[1])], options)
+}
+
+#[test]
+fn a_y_groove_is_filled_flat_along_the_whole_joint() {
+    let (parts, faces) = y_groove();
+    let before: Vec<_> = parts.iter().map(|(b, _)| b.to_record().unwrap().0).collect();
+    let got = weld(&parts, &faces, &flat()).unwrap();
+    // the groove's section: the V from the surface down to the root face, 1 wide, then the gap
+    // between the root faces, 1 deep: (1 + (1 + 14 tan 30°)) / 2 · 7 + 1
+    let area = 8.0 + 49.0 * 30.0_f64.to_radians().tan();
+    let volume = got.body.volume(1e-9).unwrap();
+    assert!((volume - 120.0 * area).abs() <= 1e-6 * volume, "{volume} != {}", 120.0 * area);
+    assert!((got.fill.channel_depth - 8.0).abs() < 1e-9, "{:?}", got.fill);
+    let (lo, hi) = got.body.bounds().unwrap();
+    assert!(lo[2].abs() < 1e-9 && (hi[2] - 120.0).abs() < 1e-9, "{lo:?} {hi:?}");
+    assert!(lo[1] > -8.0 - 1e-9 && hi[1] < 1e-9, "{lo:?} {hi:?}");
+    // the parts are only read
+    let after: Vec<_> = parts.iter().map(|(b, _)| b.to_record().unwrap().0).collect();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn a_fill_the_groove_cannot_take_is_refused_with_the_size_that_builds() {
+    let (parts, faces) = y_groove();
+    let deep = FillOptions { face: Contour::Concave { depth: 50.0 }, ..flat() };
+    let got = weld(&parts, &faces, &deep).unwrap_err();
+    let GrooveRefusal::Fill { fit: Some(fit), .. } = got else {
+        panic!("not a fill refusal with a fit: {got:?}");
+    };
+    let fits = FillOptions { face: Contour::Concave { depth: fit }, ..flat() };
+    assert!(weld(&parts, &faces, &fits).is_ok());
+}
+
+#[test]
+fn parts_of_different_length_are_refused() {
+    let (parts, faces) = y_groove_of(100.0);
+    let got = weld(&parts, &faces, &flat()).unwrap_err();
+    assert_eq!(got, GrooveRefusal::PartsNotAlongside);
 }

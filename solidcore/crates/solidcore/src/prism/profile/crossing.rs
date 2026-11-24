@@ -27,7 +27,8 @@ pub fn near_miss(eps: f64) -> f64 {
 /// join (`tol` round each join is not looked at). Neighbouring segments of one nonzero
 /// `group` (a face's pieces) are one side: they are not checked against each other, and the
 /// side joins its neighbours at its own ends. Lines and arcs only (other segments are not
-/// looked at).
+/// looked at). It decides at `tol`, not at a proved bound: two sides within `tol` of each
+/// other meet. The caller passes finite segments (a NaN compares as no meeting).
 #[must_use]
 pub fn loop_crosses(segs: &[Seg2], group: &[usize], tol: f64) -> bool {
     // each segment's side, and each side's two ends

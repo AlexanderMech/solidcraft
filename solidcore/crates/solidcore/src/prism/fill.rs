@@ -2,15 +2,15 @@
 //! of a chosen contour, as a planar section.
 //!
 //! Not upstream: SolidCraft's own (#15132, #18500). Generic geometry for any client: a
-//! [`Channel`] (two walls and, where they have one, the plates' normal) and [`FillOptions`]
-//! (each face's [`Contour`] and a depth) give [`fill`], which returns the filled section
-//! ([`Filled`]) or a typed refusal with the nearest size that builds ([`FillFailure`]). It reads
-//! and changes no body. What the region stands for, and how a refusal is worded to a user, is
-//! the caller's.
+//! [`Channel`] (two walls and, where given, the normal the depth is measured along) and
+//! [`FillOptions`] (each face's [`Contour`] and a depth) give [`fill`], which returns the
+//! filled section ([`Filled`]) or a typed refusal with the nearest size that builds
+//! ([`FillFailure`]). It reads and changes no body. What the region stands for, and how a
+//! refusal is worded to a user, is the caller's.
 //!
 //! | Rust              | What it is                                                           |
 //! |-------------------|----------------------------------------------------------------------|
-//! | [`Channel`]       | The channel: its two walls and the plates' normal                    |
+//! | [`Channel`]       | The channel: its two walls and the depth's normal                    |
 //! | [`FillOptions`]   | The contour of each face and the depth `s`                           |
 //! | [`Contour`]       | Flat, convex (sharp or blended toes) or concave                      |
 //! | [`fill`]          | The channel filled, closed by its faces                              |
@@ -29,60 +29,58 @@
 //!
 //! # The geometry
 //!
-//! The fill is generic: it fills whatever channel the walls bound, whatever its shape (V,
-//! bevel, Y, U, J, the double-sided X and K, other angles, steps, rounds).
+//! The fill fills whatever channel the walls bound, whatever its shape: walls of lines and
+//! arcs, sloped, stepped or rounded.
 //!
 //! Each wall is a chain of lines and arcs. It runs from its *toe* on the face side away from
 //! the face. Seen from the face side, `left` is on the left. A wall ends where the channel
-//! ends: on the far side's outer face when the channel runs through the plate, or where the
-//! two walls meet (both walls then end at the same point, the channel is closed).
+//! ends: apart from the other wall when the channel is open on the far side, or where the two
+//! walls meet (both walls then end at the same point, the channel is closed).
 //!
-//! The *face* closes the region between the two toes. Where the channel runs through the plate
-//! the other side is closed between the two wall ends: flat (the root, always flush), or by a
-//! *second face* of its own contour. Each face is [`Contour::Flat`] (a
-//! straight chord), [`Contour::Convex`] (an arc through the toes with its crest the given
-//! height off the chord), [`Contour::ConvexBlended`] (the same crest, run out tangentially
-//! past the toes) or [`Contour::Concave`] (an arc dipping the given depth below the chord).
+//! The *face* closes the region between the two toes. Where the channel is open on the far
+//! side, that side is closed between the two wall ends: flat (a chord), or by a *second face*
+//! of its own contour. Each face is [`Contour::Flat`] (a straight chord), [`Contour::Convex`]
+//! (an arc through the toes with its crest the given height off the chord),
+//! [`Contour::ConvexBlended`] (the same crest, run out tangentially past the toes) or
+//! [`Contour::Concave`] (an arc dipping the given depth below the chord).
 //!
-//! **Blended toes** (ISO 2553, "toes shall be blended smoothly"): a convex arc of radius `R`
-//! between the toes and at each toe a concave arc of radius `r`, tangent to the chord's line
-//! at its outer end and to the convex arc at the toe. The crest height is `h`, the blend runs
-//! `o` past each toe. With half the chord `a` and `x = a + o`: `R + r = (x² + h²) / 2h`,
-//! `R = a (R + r) / x`. `o = 0` is the plain convex face. Every arc is a polyline arc, the
-//! chord between its ends and its bulge (`prism::path_export::bulge_arc`); none is more than
-//! half a circle, so a convex face higher than half the distance between its toes is refused.
-//! The blend runs along the chord's line, so it is built only where the plates' outer faces on
-//! that side do ([`Channel::plate_normal`] given, square to the chord); elsewhere it is
-//! refused ([`FillFailure::BlendedToesOffPlane`]).
+//! **Blended toes**: a convex arc of radius `R` between the toes and at each toe a concave arc
+//! of radius `r`, tangent to the chord's line at its outer end and to the convex arc at the
+//! toe. The crest height is `h`, the blend runs `o` past each toe. With half the chord `a` and
+//! `x = a + o`: `R + r = (x² + h²) / 2h`, `R = a (R + r) / x`. `o = 0` is the plain convex
+//! face. Every arc is a polyline arc, the chord between its ends and its bulge
+//! (`prism::path_export::bulge_arc`); none is more than half a circle, so a convex face higher
+//! than half the distance between its toes is refused. The blend runs along the chord's line,
+//! so it is built only where the sides beyond the toes on that side do: [`Channel::depth_normal`]
+//! given and square to the chord. Elsewhere it is refused ([`FillFailure::BlendedToesOffChord`]).
 //!
-//! **Penetration depth `s`.** Where the plates' outer faces are parallel (a butt joint,
-//! [`Channel::plate_normal`] given), `s` is measured square to the plates from the face
-//! side's outer face of the lower plate (the one whose toe lies deeper), and the fill's bottom
-//! runs parallel to the plates: plates of unequal thickness or offset get `s` in the plate
-//! whose surface is lower, the other plate more by the step between them. Where they are not
-//! parallel (a bevel groove in a T- or corner joint) it is measured square to the face's chord
-//! from the chord. The fill reaches only that deep and the rest of the groove stays empty; the
-//! second face then does not apply. Without `s` the whole groove is filled. An `s` deeper than
-//! a closed groove fills the groove and returns a note; so does an `s` past the depth where a
-//! groove that runs through opens on the root side (the thinner plate's thickness where the
-//! plates' root sides are flush): full penetration. Neither is a refusal. [`Filled`]
-//! returns the depth it filled.
+//! **Depth `s`.** Measured from the deeper toe along `-depth_normal` where
+//! [`Channel::depth_normal`] is given, and the fill's bottom runs square to it; else from the
+//! chord, square to it. The fill reaches only that deep and the rest of the channel stays
+//! empty; the second face then does not apply. Without `s` the whole channel is filled. An `s`
+//! deeper than a closed channel fills it whole and returns a note
+//! ([`FillNote::DeeperThanChannel`]); so does an `s` past the depth where an open channel opens
+//! on the far side, the shallower wall end ([`FillNote::DeeperThanOpening`]). Neither is a
+//! refusal. [`Filled`] returns the depth it filled.
 //!
 //! A concave face is built as asked and returns how deep it dips: below the chord, and below
-//! each plate's outer face where the plates' normal is given (between plates in one plane that
-//! is below the plate's surface: ISO 6520-1 no. 511). Its limit is closed form: the depth `F`
-//! where it first touches another side of the section (a wall, the bottom, the other face);
-//! the deepest that builds is `F - δ`, δ the depth margin (the larger of the section's
-//! conservative allowance and the kernel's zone tolerance), refused past it
-//! ([`FillFailure::ConcaveFaceCrossesWall`]). With nothing touched, the half circle builds and
-//! deeper is refused ([`FillFailure::ConcaveFaceTooDeep`]). A face no higher or deeper than the
-//! zone tolerance is built flat ([`FillNote::BuiltFlat`]); one past that but shallower than
-//! the smallest arc the profile builds is refused ([`FillFailure::FaceTooShallow`]).
+//! each toe's level along `depth_normal` where it is given ([`FillNote::BelowToes`]). Its
+//! limit is closed form: the depth `F` where it first touches another side of the section (a
+//! wall, the bottom, the other face); the deepest that builds is `F - δ`, δ the depth margin
+//! (the larger of the section's conservative allowance and the kernel's zone tolerance),
+//! refused past it ([`FillFailure::ConcaveFaceCrossesWall`]). With nothing touched, the half
+//! circle builds and deeper is refused ([`FillFailure::ConcaveFaceTooDeep`]). A face no higher
+//! or deeper than the zone tolerance is built flat ([`FillNote::BuiltFlat`]); one past that but
+//! shallower than the smallest arc the profile builds is refused
+//! ([`FillFailure::FaceTooShallow`]).
+//!
+//! The crossing check and [`arc_clearance`] decide at the near-miss tolerance
+//! ([`near_miss`]), not at a proved bound: `fill` is a construction that keeps those margins.
 //!
 //! # Not covered
 //!
-//! Walls of lines and arcs only (conics and Béziers are refused). The section across one
-//! station: a groove whose section changes along the joint is the caller's to find.
+//! Walls of lines and arcs only (conics and Béziers are refused). One planar section: a
+//! channel whose section changes along its length is the caller's to slice.
 
 use std::f64::consts::{PI, TAU};
 
@@ -102,7 +100,7 @@ const OP: &str = "prism::fill";
 /// How one side of the fill is closed between its toes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Contour {
-    /// A straight chord between the toes: flush with plates in one plane.
+    /// A straight chord between the toes.
     Flat,
     /// An arc through the toes, its crest `height` off the chord, the toes sharp.
     Convex {
@@ -126,29 +124,28 @@ pub enum Contour {
 /// One channel: its two walls in the section plane.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Channel {
-    /// The left part's groove face in the section plane, from its face-side toe away from the
-    /// face: lines and arcs, each starting where the one before ends.
+    /// The left wall, from its face-side toe away from the face: lines and arcs, each
+    /// starting where the one before ends.
     pub left: Vec<Seg2>,
-    /// The right part's groove face, the same way.
+    /// The right wall, the same way.
     pub right: Vec<Seg2>,
-    /// The normal of the plates' outer faces on the face side, pointing out of the plates,
-    /// where those faces are parallel (a butt joint, the plates in one plane or offset);
-    /// `None` where they are not (a bevel groove in a T- or corner joint). It sets what the
-    /// penetration depth is measured from.
-    pub plate_normal: Option<Vec2>,
+    /// The direction the depth is measured against, pointing away from the channel (out of
+    /// the face side): the depth runs from the deeper toe along its opposite, and the sides
+    /// beyond the toes run square to it. `None`: the depth runs from the chord, square to it,
+    /// and blended toes are refused.
+    pub depth_normal: Option<Vec2>,
 }
 
-/// How the groove is filled: every option set (the caller gives the defaults).
+/// How the channel is filled: every option set (the caller gives the defaults).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FillOptions {
     /// The face's contour.
     pub face: Contour,
     /// The second face's contour, closing the far side between the wall ends; `None` for a
-    /// flat root. Used where the
-    /// groove runs through the plate and is filled whole.
+    /// flat one. Used where the channel is open on the far side and filled whole.
     pub second_face: Option<Contour>,
-    /// The penetration depth `s` (see the module's docs for what it is measured from); `None`
-    /// fills the whole groove.
+    /// The depth `s` (see the module's docs for what it is measured from); `None` fills the
+    /// whole channel.
     pub depth: Option<f64>,
 }
 
@@ -156,22 +153,21 @@ pub struct FillOptions {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum FillNote {
-    /// The penetration depth asked for is deeper than the groove, which is closed where the
-    /// parts touch: the whole groove is filled, no deeper.
-    DeeperThanGroove {
+    /// The depth asked for is deeper than the channel, which is closed where its walls meet:
+    /// the whole channel is filled, no deeper.
+    DeeperThanChannel {
         /// The depth asked for.
         asked: f64,
-        /// The groove's depth.
-        groove: f64,
+        /// The channel's depth.
+        channel: f64,
     },
-    /// The penetration depth asked for is past where the groove opens on the root side: the
-    /// groove runs through and is filled whole (full penetration).
-    DeeperThanPlate {
+    /// The depth asked for is past where the channel opens on the far side: it is filled
+    /// whole.
+    DeeperThanOpening {
         /// The depth asked for.
         asked: f64,
-        /// The depth where the groove opens on the root side (the thinner plate's thickness
-        /// where the plates' root sides are flush).
-        plate: f64,
+        /// The depth where the channel opens on the far side (the shallower wall end's depth).
+        opening: f64,
     },
     /// A face asked for no higher or deeper than the kernel's zone tolerance: built flat (no
     /// arc builds that shallow).
@@ -187,12 +183,10 @@ pub enum FillNote {
         side: FillSide,
         /// How deep below the chord.
         depth: f64,
-        /// How deep the face's lowest point lies below each plate's outer face on that side,
-        /// left then right: square to the plates where their normal is given, else below the
-        /// chord (both `depth`).
+        /// How deep the face's lowest point lies below each toe's level, left then right:
+        /// along `depth_normal` where it is given, else below the chord (both `depth`).
         below: [f64; 2],
-        /// `depth` over the groove's depth (the plate's thickness where the groove runs
-        /// through).
+        /// `depth` over the channel's depth.
         ratio: f64,
     },
 }
@@ -202,31 +196,31 @@ pub enum FillNote {
 pub struct Filled {
     /// The filled section: one counter-clockwise loop, no holes.
     pub region: Region2,
-    /// How deep the groove reaches, measured as the penetration depth is.
-    pub groove_depth: f64,
+    /// How deep the channel reaches, measured as the depth `s` is.
+    pub channel_depth: f64,
     /// How deep it is filled, measured the same way: the depth `s` where the fill ends
-    /// inside the groove, else the groove's depth.
+    /// inside the channel, else the channel's depth.
     pub filled_depth: f64,
-    /// Whether the groove runs through the plate (the walls end apart).
+    /// Whether the channel is open on the far side (the walls end apart).
     pub through: bool,
     /// What a caller may report.
     pub notes: Vec<FillNote>,
 }
 
-/// The fill of `section` with `options`: the groove between its walls filled, closed
+/// The fill of `section` with `options`: the channel between its walls filled, closed
 /// by its faces.
 ///
 /// # Errors
 ///
 /// [`SolidError::InvalidInput`] for walls that are empty, not lines and arcs, not connected,
-/// not finite, that do not run away from the face, that cross each other, a plates' normal
-/// that is not finite or points into the plates, or a contour or depth that is not finite and
+/// not finite, that do not run away from the face, that cross each other, a depth normal
+/// that is not finite or points into the channel, or a contour or depth that is not finite and
 /// positive. A face this construction does not build is refused as a [`FillFailure`]: a
 /// convex face past half a circle ([`FillFailure::ConvexFaceTooHigh`]), a concave face that
 /// reaches the section's other sides ([`FillFailure::ConcaveFaceCrossesWall`]) or dips past
 /// half a circle ([`FillFailure::ConcaveFaceTooDeep`]), each with its limit as its [`Fit`], in
-/// closed form; blended toes where the plates' outer faces do not run along the chord
-/// ([`FillFailure::BlendedToesOffPlane`]).
+/// closed form; blended toes where the sides beyond the toes do not run along the chord
+/// ([`FillFailure::BlendedToesOffChord`]).
 pub fn fill(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled> {
     check_input(section, options)?;
     build(k, section, options)
@@ -263,9 +257,9 @@ fn build(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled>
             "a wall that does not run away from the face (left and right swapped?)",
         ));
     }
-    // what the penetration depth is measured from: the lower plate's outer face, square to
-    // the plates, where they are parallel; else the chord
-    let plates = match section.plate_normal {
+    // what the depth is measured from: the deeper toe, along the depth normal where given;
+    // else the chord
+    let normal = match section.depth_normal {
         Some(n) => {
             // scaled by its larger part first, so neither its length's overflow nor its
             // underflow matters
@@ -275,37 +269,36 @@ fn build(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled>
             if up.dot(chord_up) <= 0.0 {
                 return Err(SolidError::invalid_input(
                     OP,
-                    "a plates' normal that points into the plates",
+                    "a depth normal that points into the channel",
                 ));
             }
             Some(up)
         }
         None => None,
     };
-    let (origin, up) = match plates {
+    let (origin, up) = match normal {
         Some(up) => (if (l0 - r0).dot(up) <= 0.0 { l0 } else { r0 }, up),
         None => (l0, chord_up),
     };
     let below = |p: Point2| -(p - origin).dot(up);
-    let groove_depth = left
+    let channel_depth = left
         .iter()
         .chain(right)
         .flat_map(|s| deepest_points(s, -up))
         .map(below)
         .fold(0.0_f64, f64::max);
-    if groove_depth <= eps {
+    if channel_depth <= eps {
         return Err(SolidError::invalid_input(
             OP,
-            "a groove of no depth below the lower plate's face",
+            "a channel of no depth below the deeper toe",
         ));
     }
     let through = lb.distance(rb) > eps;
-    // where a groove that runs through opens on the root side: past it the fill is full
-    // penetration
+    // where an open channel opens on the far side: past it the channel is filled whole
     let full = if through {
         below(lb).min(below(rb))
     } else {
-        groove_depth
+        channel_depth
     };
     let mut notes = Vec::new();
 
@@ -313,7 +306,7 @@ fn build(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled>
     let (mut left_wall, mut right_wall) = (left.clone(), right.clone());
     let mut bottom: Vec<Seg2> = Vec::new();
     let mut cut = false;
-    let mut filled_depth = groove_depth;
+    let mut filled_depth = channel_depth;
     if let Some(s) = options.depth {
         if s < full - eps {
             let (Some(l), Some(r)) = (
@@ -322,14 +315,11 @@ fn build(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled>
             ) else {
                 return Err(SolidError::invalid_input(
                     OP,
-                    "a penetration depth that cuts one wall only",
+                    "a depth that cuts one wall only",
                 ));
             };
             let (Some(le), Some(re)) = (l.last().map(Seg2::end), r.last().map(Seg2::end)) else {
-                return Err(SolidError::invalid_input(
-                    OP,
-                    "a penetration depth above a toe",
-                ));
+                return Err(SolidError::invalid_input(OP, "a depth above a toe"));
             };
             left_wall = l;
             right_wall = r;
@@ -340,14 +330,14 @@ fn build(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled>
             filled_depth = s;
         } else if s > full + eps {
             notes.push(if through {
-                FillNote::DeeperThanPlate {
+                FillNote::DeeperThanOpening {
                     asked: s,
-                    plate: full,
+                    opening: full,
                 }
             } else {
-                FillNote::DeeperThanGroove {
+                FillNote::DeeperThanChannel {
                     asked: s,
-                    groove: groove_depth,
+                    channel: channel_depth,
                 }
             });
         }
@@ -373,11 +363,11 @@ fn build(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled>
             rb,
             lb,
             second(options),
-            plates.map(|n| -n),
+            normal.map(|n| -n),
             eps,
         )?;
     }
-    check_face(FillSide::Face, l0, r0, options.face, plates, eps)?;
+    check_face(FillSide::Face, l0, r0, options.face, normal, eps)?;
     let second_path = if second_used {
         close(rb, lb, second(options))
     } else {
@@ -492,15 +482,15 @@ fn build(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled>
             "a section of no area (left and right swapped?)",
         ));
     }
-    // a concave face's dip: below the chord, and below each plate's outer face on its side
+    // a concave face's dip: below the chord, and below each toe's level
     for (side, contour, closing, toes, out) in [
-        (FillSide::Face, options.face, &face, [l0, r0], plates),
+        (FillSide::Face, options.face, &face, [l0, r0], normal),
         (
             FillSide::Second,
             second(options),
             &bottom,
             [lb, rb],
-            plates.map(|n| -n),
+            normal.map(|n| -n),
         ),
     ] {
         let used = side == FillSide::Face || (through && !cut);
@@ -524,12 +514,12 @@ fn build(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled>
             side,
             depth,
             below: below_toes,
-            ratio: depth / groove_depth,
+            ratio: depth / channel_depth,
         });
     }
     Ok(Filled {
         region,
-        groove_depth,
+        channel_depth,
         filled_depth,
         through,
         notes,
@@ -586,12 +576,12 @@ fn check_input(section: &Channel, options: &FillOptions) -> Result<()> {
     }
     let positive = |v: f64| v.is_finite() && v > 0.0;
     if section
-        .plate_normal
+        .depth_normal
         .is_some_and(|n| !(n.x.is_finite() && n.y.is_finite()) || (n.x == 0.0 && n.y == 0.0))
     {
         return Err(SolidError::invalid_input(
             OP,
-            "a plates' normal that is not finite and non-zero",
+            "a depth normal that is not finite and non-zero",
         ));
     }
     for contour in [options.face, second(options)] {
@@ -613,7 +603,7 @@ fn check_input(section: &Channel, options: &FillOptions) -> Result<()> {
     if options.depth.is_some_and(|s| !positive(s)) {
         return Err(SolidError::invalid_input(
             OP,
-            "a penetration depth that is not finite and positive",
+            "a depth that is not finite and positive",
         ));
     }
     Ok(())
@@ -623,16 +613,28 @@ fn finite(p: Point2) -> bool {
     p.x.is_finite() && p.y.is_finite()
 }
 
-/// The size of the walls: their largest coordinate (arcs with their reach), at least 1.
+/// The size of the walls: their largest coordinate (an arc's points where it passes an axis
+/// direction included), at least 1, and at least a millionth of any arc's radius, which keeps
+/// the tolerances above the rounding of a far centre. Not the centre's own coordinates: a
+/// shallow wall's centre lies far off, and the tolerances would outgrow the section.
 fn scale<'a>(segs: impl Iterator<Item = &'a Seg2>) -> f64 {
+    let axes = [
+        Vec2::new(1.0, 0.0),
+        Vec2::new(-1.0, 0.0),
+        Vec2::new(0.0, 1.0),
+        Vec2::new(0.0, -1.0),
+    ];
     segs.fold(1.0_f64, |m, s| {
-        let reach = match *s {
-            Seg2::Arc { center, radius, .. } => center.x.abs().max(center.y.abs()) + radius,
+        let far = match *s {
+            Seg2::Arc { radius, .. } => axes
+                .iter()
+                .flat_map(|&d| deepest_points(s, d))
+                .fold(radius * 1e-6, |m, p| m.max(p.max_dimension())),
             _ => 0.0,
         };
         m.max(s.start().max_dimension())
             .max(s.end().max_dimension())
-            .max(reach)
+            .max(far)
     })
 }
 
@@ -757,8 +759,8 @@ fn shallow(
 
 /// A face's own limits, before it is built: a convex face no higher than half a circle allows
 /// (its fit `a + o`, half the toe distance plus the blend's overlap: the main arc's half sweep
-/// `2 atan(h / (a + o))` reaches a quarter turn there), blended toes only where the plates'
-/// outer faces on that side run along the chord (`out`, their normal, square to it).
+/// `2 atan(h / (a + o))` reaches a quarter turn there), blended toes only where the sides
+/// beyond the toes run along the chord (`out`, the depth normal, square to it).
 fn check_face(
     side: FillSide,
     p: Point2,
@@ -775,7 +777,7 @@ fn check_face(
             if overlap > 0.0 && !along {
                 return Err(Failure::new(
                     OP,
-                    Reason::Fill(FillFailure::BlendedToesOffPlane { side }),
+                    Reason::Fill(FillFailure::BlendedToesOffChord { side }),
                 )
                 .into_error());
             }
@@ -827,8 +829,9 @@ fn unbuilt(side: FillSide, p: Point2, q: Point2, contour: Contour) -> SolidError
 /// section the sides belong to (as for [`near_miss`]). Each side is grown towards the arcs by
 /// twice the near-miss tolerance, so an arc short of the limit is never flagged by
 /// [`loop_crosses`]; a side that leaves a toe (`p` or `q`) is grown the same way back past the
-/// toe. A caller keeps a depth margin below the limit. `p` and `q` at one point (or not finite)
-/// give `(0, false)`. Closed form: the arcs
+/// toe. It decides at that tolerance, not at a proved bound; a caller keeps a depth margin
+/// below the limit. `p` and `q` at one point (or not finite) give `(0, false)`; the sides are
+/// the caller's to pass finite. Closed form: the arcs
 /// through `p` and `q` are a pencil of circles, each deeper one below the one before, so the
 /// first that reaches a grown side does so at a vertex's circle or where it is tangent to the
 /// side. The circle of dip `s` has its centre `m + n (R - s)`, `R = (a² + s²) / 2s` (`m` the
@@ -1055,7 +1058,8 @@ fn arc_about(center: Point2, p: Point2, q: Point2, ccw: bool) -> Option<Seg2> {
 /// The chain of lines and arcs `chain` up to where it first reaches `s` below the line through
 /// `origin` square to `up` (a unit vector), ending there; `None` when it never does. `eps` is
 /// the conservative allowance: a chain that reaches `s` within it of its start is `None`, one
-/// that reaches it within it of a segment's end ends at that end.
+/// that reaches it within it of a segment's end ends at that end. The caller passes finite
+/// segments and a unit `up` (`s` is a distance only along a unit vector).
 #[must_use]
 pub fn cut_chain(chain: &[Seg2], s: f64, origin: Point2, up: Vec2, eps: f64) -> Option<Vec<Seg2>> {
     let below = |p: Point2| -(p - origin).dot(up);
@@ -1096,11 +1100,17 @@ pub fn cut_chain(chain: &[Seg2], s: f64, origin: Point2, up: Vec2, eps: f64) -> 
             }
             _ => None,
         };
+        // the cut's distance from the segment's ends along it, against eps (a distance)
+        let len = match *seg {
+            Seg2::Line { a, b } => a.distance(b),
+            Seg2::Arc { radius, sweep, .. } => radius * sweep.abs(),
+            _ => 0.0,
+        };
         match hit {
-            Some(t) if t <= eps => {
+            Some(t) if t * len <= eps => {
                 return (!out.is_empty()).then_some(out);
             }
-            Some(t) if t < 1.0 - eps => {
+            Some(t) if (1.0 - t) * len > eps => {
                 out.push(part(seg, t));
                 return Some(out);
             }

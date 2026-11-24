@@ -11,7 +11,7 @@
 //! | [`FillFailure::ConcaveFaceTooDeep`]       | `SM_ERR` (no C++)        |
 //! | [`FillFailure::FaceTooShallow`]           | `SM_ERR` (no C++)        |
 //! | [`FillFailure::ConvexFaceTooHigh`]        | `SM_ERR` (no C++)        |
-//! | [`FillFailure::BlendedToesOffPlane`]      | `SM_ERR` (no C++)        |
+//! | [`FillFailure::BlendedToesOffChord`]      | `SM_ERR` (no C++)        |
 
 use super::{ErrorKind, SM_ERR};
 
@@ -28,7 +28,7 @@ pub enum FillSide {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum FillFailure {
-    /// A concave face `depth` deep reaches the section's other sides (a groove wall, the other
+    /// A concave face `depth` deep reaches the section's other sides (a wall, the other
     /// face or the bottom). The face first touches one at a depth `F`, in closed form, each
     /// side grown towards it by twice the crossing check's near-miss tolerance (100 times the
     /// section's conservative allowance). The
@@ -70,11 +70,10 @@ pub enum FillFailure {
         /// The height asked for.
         height: f64,
     },
-    /// Blended toes where the plates' outer faces on that side do not run along the chord
-    /// between the toes (offset plates, plates of unequal thickness on that side, or no
-    /// common plate normal, as in a T- or corner joint): the run-out would not be tangent to
-    /// either plate.
-    BlendedToesOffPlane {
+    /// Blended toes where the sides beyond the toes do not run along the chord between them
+    /// (no depth normal given, or one not square to the chord): the run-out would not be
+    /// tangent to them.
+    BlendedToesOffChord {
         /// Which face.
         side: FillSide,
     },
@@ -89,7 +88,7 @@ impl FillFailure {
             | Self::ConcaveFaceTooDeep { .. }
             | Self::FaceTooShallow { .. }
             | Self::ConvexFaceTooHigh { .. }
-            | Self::BlendedToesOffPlane { .. } => SM_ERR,
+            | Self::BlendedToesOffChord { .. } => SM_ERR,
         }
     }
 
@@ -101,7 +100,7 @@ impl FillFailure {
             | Self::ConcaveFaceTooDeep { .. }
             | Self::FaceTooShallow { .. }
             | Self::ConvexFaceTooHigh { .. }
-            | Self::BlendedToesOffPlane { .. } => ErrorKind::Unsupported,
+            | Self::BlendedToesOffChord { .. } => ErrorKind::Unsupported,
         }
     }
 }
@@ -133,9 +132,9 @@ impl core::fmt::Display for FillFailure {
                 "a convex {} {height} high is past half a circle",
                 name(side)
             ),
-            Self::BlendedToesOffPlane { side } => write!(
+            Self::BlendedToesOffChord { side } => write!(
                 f,
-                "blended toes on a {} whose plates do not run along its chord",
+                "blended toes on a {} whose sides beyond the toes do not run along its chord",
                 name(side)
             ),
         }

@@ -64,7 +64,7 @@ const ZONE: f64 = 1e-5;
 struct Case {
     left: Vec<Seg2>,
     right: Vec<Seg2>,
-    plate_normal: Option<Vec2>,
+    depth_normal: Option<Vec2>,
     face: Contour,
     second_face: Option<Contour>,
     depth: Option<f64>,
@@ -75,7 +75,7 @@ impl Default for Case {
         Self {
             left: Vec::new(),
             right: Vec::new(),
-            plate_normal: None,
+            depth_normal: None,
             face: Contour::Flat,
             second_face: None,
             depth: None,
@@ -96,7 +96,7 @@ fn run(c: &Case) -> Result<Filled> {
     let section = Channel {
         left: c.left.clone(),
         right: c.right.clone(),
-        plate_normal: c.plate_normal,
+        depth_normal: c.depth_normal,
     };
     let options = FillOptions {
         face: c.face,
@@ -205,7 +205,7 @@ fn every_standard_groove_is_filled_to_its_closed_form_area() {
     close(area(&v), G * t + t * t * tan(30.0));
     let s = section(&v);
     assert!(s.through);
-    assert!((s.groove_depth - t).abs() < 1e-12);
+    assert!((s.channel_depth - t).abs() < 1e-12);
     assert!(s.notes.is_empty());
 
     let (l, r) = bevel_walls(t, 45.0, 0.0);
@@ -349,7 +349,7 @@ fn blended_toes_run_out_tangentially_past_the_groove() {
     let h = 1.5;
     // the plates' outer faces along the chord (plates in one plane): blended toes build
     let flat = Case {
-        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
         ..channel(l.clone(), r.clone())
     };
     // an overlap equal to the crest height (ops' default)
@@ -514,7 +514,7 @@ fn a_concave_face_across_the_walls_is_refused_with_the_deepest_that_builds() {
 }
 
 #[test]
-fn a_penetration_depth_fills_the_groove_only_that_deep() {
+fn a_depth_fills_the_channel_only_that_deep() {
     let t = 6.0;
     let (l, r) = v_walls(t, 60.0, 0.0);
     let s = 4.0;
@@ -543,9 +543,9 @@ fn a_penetration_depth_fills_the_groove_only_that_deep() {
     close(area(&w), G * t + t * t * tan(30.0));
     assert_eq!(
         section(&w).notes,
-        vec![FillNote::DeeperThanPlate {
+        vec![FillNote::DeeperThanOpening {
             asked: 8.0,
-            plate: 6.0
+            opening: 6.0
         }]
     );
 
@@ -579,9 +579,9 @@ fn a_depth_past_a_closed_groove_fills_the_groove_and_says_so() {
     close(area(&w), 36.0 * tan(30.0));
     assert_eq!(
         s.notes,
-        vec![FillNote::DeeperThanGroove {
+        vec![FillNote::DeeperThanChannel {
             asked: 8.0,
-            groove: 6.0
+            channel: 6.0
         }]
     );
 }
@@ -673,13 +673,13 @@ fn x_at(a: Point2, b: Point2, y: f64) -> f64 {
 }
 
 #[test]
-fn the_depth_is_measured_from_the_lower_plate_where_the_plates_are_parallel() {
+fn the_depth_is_measured_from_the_deeper_toe_along_the_depth_normal() {
     let up = Some(Vec2::new(0.0, 1.0));
     // a 60 degree V between plates 10 and 8 thick, their undersides flush (at -10)
     let (l0, lb) = (p(-(G / 2.0 + 10.0 * tan(30.0)), 0.0), p(-G / 2.0, -10.0));
     let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), -2.0), p(G / 2.0, -10.0));
     let unequal = Case {
-        plate_normal: up,
+        depth_normal: up,
         ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
     };
     // s = 6 from the thinner (lower) plate's face: the fill's bottom level at -8, 6 into the
@@ -695,7 +695,7 @@ fn the_depth_is_measured_from_the_lower_plate_where_the_plates_are_parallel() {
         lowest(&got)
     );
     assert!((got.filled_depth - 6.0).abs() < 1e-12);
-    assert!((got.groove_depth - 8.0).abs() < 1e-12);
+    assert!((got.channel_depth - 8.0).abs() < 1e-12);
     assert!(got.notes.is_empty());
     close(
         area(&w),
@@ -716,15 +716,15 @@ fn the_depth_is_measured_from_the_lower_plate_where_the_plates_are_parallel() {
     assert!((got.filled_depth - 8.0).abs() < 1e-12);
     assert_eq!(
         got.notes,
-        vec![FillNote::DeeperThanPlate {
+        vec![FillNote::DeeperThanOpening {
             asked: 9.0,
-            plate: 8.0
+            opening: 8.0
         }]
     );
     // without the plates' normal the depth is measured from the chord: not level
     let chord = section(&Case {
         depth: Some(6.0),
-        plate_normal: None,
+        depth_normal: None,
         ..unequal
     });
     assert!((lowest(&chord) + 8.0).abs() > 0.1);
@@ -733,7 +733,7 @@ fn the_depth_is_measured_from_the_lower_plate_where_the_plates_are_parallel() {
     let (l0, lb) = (p(-(G / 2.0 + 8.0 * tan(30.0)), 0.0), p(-G / 2.0, -8.0));
     let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), -2.0), p(G / 2.0, -10.0));
     let offset = Case {
-        plate_normal: up,
+        depth_normal: up,
         ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
     };
     let w = Case {
@@ -761,19 +761,19 @@ fn the_depth_is_measured_from_the_lower_plate_where_the_plates_are_parallel() {
     assert!((got.filled_depth - 8.0).abs() < 1e-12);
     assert_eq!(
         got.notes,
-        vec![FillNote::DeeperThanPlate {
+        vec![FillNote::DeeperThanOpening {
             asked: 7.0,
-            plate: 6.0
+            opening: 6.0
         }]
     );
 }
 
 #[test]
-fn a_concave_face_between_offset_plates_says_how_deep_it_dips_below_each() {
+fn a_concave_face_between_offset_toes_says_how_deep_it_dips_below_each() {
     let (l0, lb) = (p(-(G / 2.0 + 8.0 * tan(30.0)), 0.0), p(-G / 2.0, -8.0));
     let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), -2.0), p(G / 2.0, -10.0));
     let w = Case {
-        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
         face: Contour::Concave { depth: 1.0 },
         ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
     };
@@ -803,7 +803,7 @@ fn a_concave_face_between_offset_plates_says_how_deep_it_dips_below_each() {
 }
 
 #[test]
-fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
+fn a_depth_normal_that_is_not_finite_or_points_into_the_channel_is_refused() {
     let (l, r) = v_walls(6.0, 60.0, 0.0);
     for n in [
         Vec2::new(0.0, -1.0),
@@ -811,7 +811,7 @@ fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
         Vec2::new(f64::NAN, 1.0),
     ] {
         let err = run(&Case {
-            plate_normal: Some(n),
+            depth_normal: Some(n),
             ..channel(l.clone(), r.clone())
         })
         .unwrap_err();
@@ -828,13 +828,13 @@ fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
         Vec2::new(0.0, 1e-310),
     ] {
         let tiny_or_huge = run(&Case {
-            plate_normal: Some(n),
+            depth_normal: Some(n),
             depth: Some(4.0),
             ..channel(l.clone(), r.clone())
         })
         .unwrap();
         let unit = run(&Case {
-            plate_normal: Some(Vec2::new(0.0, 1.0)),
+            depth_normal: Some(Vec2::new(0.0, 1.0)),
             depth: Some(4.0),
             ..channel(l.clone(), r.clone())
         })
@@ -843,13 +843,13 @@ fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
     }
     // a subnormal normal tilted by 1e-10 is read as that tilt, not refused
     assert!(run(&Case {
-        plate_normal: Some(Vec2::new(1e-320, 1e-310)),
+        depth_normal: Some(Vec2::new(1e-320, 1e-310)),
         depth: Some(4.0),
         ..channel(l.clone(), r.clone())
     })
     .is_ok());
     let one_plane = run(&Case {
-        plate_normal: Some(Vec2::new(0.0, 3.0)),
+        depth_normal: Some(Vec2::new(0.0, 3.0)),
         depth: Some(4.0),
         ..channel(l.clone(), r.clone())
     })
@@ -913,7 +913,7 @@ fn a_convex_face_past_half_a_circle_is_refused_with_the_highest_that_builds() {
     let (l, r) = v_walls(6.0, 60.0, 0.0);
     let a = G / 2.0 + 6.0 * tan(30.0);
     let flat = Case {
-        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
         ..channel(l, r)
     };
     // a plain convex face: half the toe distance
@@ -963,7 +963,7 @@ fn a_convex_face_past_half_a_circle_is_refused_with_the_highest_that_builds() {
 }
 
 #[test]
-fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
+fn blended_toes_where_the_sides_beyond_do_not_run_along_the_chord_are_refused() {
     let blended = Contour::ConvexBlended {
         height: 1.0,
         overlap: 1.0,
@@ -976,7 +976,7 @@ fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
     });
     assert_eq!(
         why,
-        FillFailure::BlendedToesOffPlane {
+        FillFailure::BlendedToesOffChord {
             side: FillSide::Face
         }
     );
@@ -986,12 +986,12 @@ fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
     let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), -2.0), p(G / 2.0, -10.0));
     let (why, _) = refused(&Case {
         face: blended,
-        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
         ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
     });
     assert_eq!(
         why,
-        FillFailure::BlendedToesOffPlane {
+        FillFailure::BlendedToesOffChord {
             side: FillSide::Face
         }
     );
@@ -1000,7 +1000,7 @@ fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
     let (l0, lb) = (p(-(G / 2.0 + 10.0 * tan(30.0)), 0.0), p(-G / 2.0, -10.0));
     let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), 0.0), p(G / 2.0, -8.0));
     let unequal = Case {
-        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
         ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
     };
     assert!(run(&Case {
@@ -1014,7 +1014,7 @@ fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
     });
     assert_eq!(
         why,
-        FillFailure::BlendedToesOffPlane {
+        FillFailure::BlendedToesOffChord {
             side: FillSide::Second
         }
     );
@@ -1238,7 +1238,7 @@ fn a_face_shallower_than_any_arc_is_built_flat_or_refused_with_the_smallest_arc(
 fn the_fit_of_a_convex_face_builds_when_retried() {
     let (l, r) = v_walls(6.0, 60.0, 0.0);
     let flat = Case {
-        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
         ..channel(l, r)
     };
     for face in [
@@ -1279,7 +1279,7 @@ fn a_face_is_checked_against_the_walls_as_built_not_as_its_chord() {
         let left = vec![line(p(-5.0, 0.0), corner), line(corner, p(-1.0, -6.0))];
         let right = mirror(&left);
         Case {
-            plate_normal: Some(Vec2::new(0.0, 1.0)),
+            depth_normal: Some(Vec2::new(0.0, 1.0)),
             ..channel(left, right)
         }
     };
@@ -1349,7 +1349,7 @@ fn shallow_blended_toes_build_or_are_refused_with_a_fit_that_builds() {
         overlap: 1.0,
     };
     let groove = |a: f64| Case {
-        plate_normal: Some(Vec2::new(0.0, 1.0)),
+        depth_normal: Some(Vec2::new(0.0, 1.0)),
         ..channel(
             vec![line(p(-a, 0.0), p(-(a - 1.0), -6.0))],
             vec![line(p(a, 0.0), p(a - 1.0, -6.0))],
@@ -1549,15 +1549,29 @@ fn concave_fits_build_when_retried_on_every_scale() {
                 p(1.0 - 0.5 * t.cos(), -0.5 * t.sin()),
             )]);
         }
-        for t in [5.0_f64, 1.0, 0.05] {
-            for rho in [0.5, 2.0, 10.0, 1000.0] {
-                walls.push(vec![toe_arc(t, rho, true)]);
-                // shortcut: an arc curving up at 0.05 degrees ends 1e-7 of the size below
-                // the chord, its channel a sliver (refused as crossing, without a fit); not
-                // swept until the sliver band (#21152) says what such a channel builds
-                if t > 0.5 {
-                    walls.push(vec![toe_arc(t, rho, false)]);
+        // arc walls leaving the toe: down at 5, 1, 0.05 and 0.01 degrees, up at 5, 1, 0.2 and
+        // 0.05 (radius 0.5 only where its flat face builds)
+        for (t, down) in [
+            (5.0, true),
+            (1.0, true),
+            (0.05, true),
+            (0.01, true),
+            (5.0, false),
+            (1.0, false),
+            (0.2, false),
+            (0.05, false),
+        ] {
+            for rho in [0.5, 2.0, 10.0, 100.0, 1000.0] {
+                // shortcut: four walls curving up at 0.05 degrees get a fit whose section is
+                // refused as of no area (its area's bound straddles zero); left out until the
+                // area band (#21152) is settled
+                let no_area = [(10.0, 10.0), (2.0, 100.0), (10.0, 100.0), (10.0, 1e3)];
+                if (rho < 1.0 && !down && t < 0.5)
+                    || (!down && t < 0.1 && no_area.contains(&(rho, f)))
+                {
+                    continue;
                 }
+                walls.push(vec![toe_arc(t, rho, down)]);
             }
         }
         for right in walls {
@@ -1622,4 +1636,23 @@ fn concave_fits_build_beside_shallow_and_curved_walls_that_leave_the_toe() {
             "fit {fit} does not build"
         );
     }
+}
+
+#[test]
+fn a_depth_cut_on_a_large_section_lies_at_its_level() {
+    // the right wall (f, 0) -> (f, -0.4 f) -> (0.1 f, -1.4 f), mirrored, filled 0.4 f + d deep
+    // from the chord: the band below the wall's corner has the closed-form area 2 f d - 0.9 d²
+    // (brett19 on #18947, 24 Nov: the cut snapped to the corner, 2e4 short)
+    let (f, d) = (1e5, 0.1);
+    let right = vec![
+        line(p(f, 0.0), p(f, -0.4 * f)),
+        line(p(f, -0.4 * f), p(0.1 * f, -1.4 * f)),
+    ];
+    let w = Case {
+        depth: Some(0.4 * f + d),
+        ..channel(mirror(&right), right.clone())
+    };
+    let got = area(&w);
+    let want = 0.8 * f * f + 2.0 * f * d - 0.9 * d * d;
+    assert!((got - want).abs() < 1e-3, "area {got}, want {want}");
 }

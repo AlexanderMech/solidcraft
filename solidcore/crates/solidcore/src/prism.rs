@@ -10,7 +10,9 @@
 //!
 //! Every query here returns its value with a proved bound, exactly, or not at all (`None` or a
 //! typed refusal): it decides nothing at a tolerance it cannot prove (owner rule 13564). The
-//! exception is [`fill`], a construction that keeps the margins its docs give.
+//! exception is [`fill`], a construction that keeps the margins its docs give, with the two
+//! queries it is built from, [`profile::loop_crosses`] and [`fill::arc_clearance`]: they decide
+//! at the near-miss tolerance ([`profile::near_miss`]), not at a proved bound.
 
 pub mod export_geometry;
 pub mod extrude;

@@ -488,10 +488,14 @@ fn a_concave_face_across_the_walls_is_refused_with_the_deepest_that_builds() {
         })
     );
     // the arc touches the 60 degree V where its end tangent is as steep as the wall: at
-    // 2 atan(d / a) = 60 degrees, F = a tan 30 (closed form, not searched); the deepest that
-    // builds keeps the depth margin, here the zone tolerance, from it
-    let touch = a * tan(30.0);
-    assert!((touch - 2.288_675_134_594_813).abs() < 1e-12);
+    // 2 atan(d / a) = 60 degrees, a tan 30 (closed form, not searched). It stops a little short
+    // of that, at the circle through the wall's line just behind the toe (`toe_touch`), and the
+    // deepest that builds keeps the depth margin, here the zone tolerance, from that
+    let touch = toe_touch(&w, a, 60.0);
+    assert!(
+        touch < a * tan(30.0) && a * tan(30.0) - touch < 1e-6,
+        "{touch}"
+    );
     let fit = err
         .fit()
         .expect("the refusal says the depth that builds")
@@ -507,6 +511,7 @@ fn a_concave_face_across_the_walls_is_refused_with_the_deepest_that_builds() {
     assert!(just(fit).is_ok());
     assert!(just(fit + 1e-9).is_err());
     assert!(just(touch).is_err());
+    assert!(just(a * tan(30.0)).is_err());
 }
 
 #[test]
@@ -861,7 +866,8 @@ fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
 #[test]
 fn a_concave_face_on_square_walls_is_refused_where_it_touches_them() {
     // a square groove 6 wide: its walls stand square to the face, so the face touches them at
-    // the half circle, 3 deep, and the deepest that builds keeps the depth margin from that
+    // the half circle, 3 deep; it stops just short of that (`toe_touch`), and the deepest that
+    // builds keeps the depth margin from there
     let w = Case {
         face: Contour::Concave { depth: 4.0 },
         ..weld(
@@ -881,7 +887,9 @@ fn a_concave_face_on_square_walls_is_refused_where_it_touches_them() {
         })
     );
     let fit = err.fit().unwrap().size;
-    assert!((fit - (3.0 - ZONE)).abs() < 1e-12, "fit {fit}");
+    let touch = toe_touch(&w, 3.0, 90.0);
+    assert!(touch < 3.0 && 3.0 - touch < 1e-6, "{touch}");
+    assert!((fit - (touch - ZONE)).abs() < 1e-12, "fit {fit}");
     assert!(run(&Case {
         face: Contour::Concave { depth: fit },
         ..w
@@ -1015,7 +1023,8 @@ fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
 
 /// How far `fill` grows each side towards a concave face: twice the crossing check's
 /// near-miss tolerance, 100 times the conservative allowance (1e-9 of the section's size, its
-/// largest coordinate and at least 1).
+/// largest coordinate and at least 1). The size is read from the sides' end points only: an
+/// arc wall bulging past its ends is not counted, so this is for line walls.
 fn grown(c: &Case) -> f64 {
     let size = c
         .left
@@ -1024,6 +1033,24 @@ fn grown(c: &Case) -> f64 {
         .flat_map(|s| [s.start(), s.end()])
         .fold(1.0_f64, |m, q| m.max(q.x.abs()).max(q.y.abs()));
     2.0 * 100.0 * 1e-9 * size
+}
+
+/// Where a concave face between the toes (-a, 0) and (a, 0) stops against a straight wall
+/// leaving the toe (a, 0) at `angle` degrees below the chord: the circle through the toes and
+/// the point of the wall's line `b` back past the toe, with `b` the growth plus the crossing
+/// check's rounding allowance there, 8 `f64::EPSILON` R² / tol for the radius R of the arc that
+/// touches the wall at the toe (`a tan(angle / 2)` deep). Its centre (0, k) is read from the
+/// three points (not the fill's tangency quadratics).
+fn toe_touch(c: &Case, a: f64, angle: f64) -> f64 {
+    let off = grown(c);
+    let tol = off / 2.0;
+    let s0 = a * tan(angle / 2.0);
+    let r0 = (a * a + s0 * s0) / (2.0 * s0);
+    let b = (off + 8.0 * f64::EPSILON * r0 * r0 / tol).min(a);
+    let t = angle.to_radians();
+    let (x, y) = (a + b * t.cos(), b * t.sin());
+    let k = (x * x + y * y - a * a) / (2.0 * y);
+    a * a / (a.hypot(k) + k)
 }
 
 #[test]
@@ -1064,13 +1091,14 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
     assert!(run(&cut(fit + 1e-9)).is_err());
     // both faces concave on a thin X, each past what builds: a typed refusal, the face first.
     // The second face is past its half circle, so its chord stands in, and the toe decides:
-    // a tan 30 with a = 0.5 + tan 30
+    // just short of a tan 30 with a = 0.5 + tan 30 (`toe_touch`)
     let (l, r) = x_walls(2.0, 0.0);
-    let (why, fit) = refused(&Case {
+    let thin_x = Case {
         face: Contour::Concave { depth: 1.5 },
         second_face: Some(Contour::Concave { depth: 1.5 }),
         ..weld(l, r)
-    });
+    };
+    let (why, fit) = refused(&thin_x);
     assert!(
         matches!(
             why,
@@ -1082,10 +1110,9 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
         "{why:?}"
     );
     let fit = fit.unwrap();
-    assert!(
-        (fit - (0.622_008_467_928_146_2 - ZONE)).abs() < 1e-12,
-        "{fit}"
-    );
+    let touch = toe_touch(&thin_x, 0.5 + tan(30.0), 60.0);
+    assert!((0.622_008_467_928_146_2 - touch).abs() < 1e-6, "{touch}");
+    assert!((fit - (touch - ZONE)).abs() < 1e-12, "{fit}");
 
     // a square groove 10 wide and 4 deep through the plate: a concave face meets a concave
     // second face 2 high in the middle, at 4 - 2
@@ -1459,8 +1486,9 @@ fn a_concave_fit_against_a_step_in_the_wall_builds_on_every_scale() {
 
 #[test]
 fn concave_fits_build_when_retried_on_every_scale() {
-    // V walls of several slopes, a square groove and the U groove, from 1 to 1e5 wide, each
-    // asked for concave faces that reach past what they touch: every refusal's fit builds
+    // V walls of several slopes (down to about 2 degrees), a square groove, the U groove and the
+    // stepped wall, from 1 to 1e5 wide, each asked for concave faces that reach past what they
+    // touch: every refusal's fit builds
     let grow = |wall: Vec<Seg2>, f: f64| -> Vec<Seg2> {
         wall.into_iter()
             .map(|s| match s {
@@ -1482,13 +1510,20 @@ fn concave_fits_build_when_retried_on_every_scale() {
     };
     let mut refused_fits = Vec::new();
     for f in [1.0, 10.0, 100.0, 1e3, 1e4, 1e5] {
-        let mut walls = vec![u_right(), vec![line(p(3.0, 0.0), p(3.0, -6.0))]];
+        let mut walls = vec![
+            u_right(),
+            vec![line(p(3.0, 0.0), p(3.0, -6.0))],
+            step_wall(),
+        ];
         for (dx, dy) in [
             (0.01, -0.02),
             (0.01, -2.0),
             (0.001, -0.01),
             (-0.01, -0.03),
             (0.05, -0.01),
+            // shallow toe angles, about 5 and 2 degrees
+            (0.5, -0.043_744),
+            (0.5, -0.017_455),
         ] {
             walls.push(vec![line(p(1.0, 0.0), p(1.0 - dx, dy))]);
         }

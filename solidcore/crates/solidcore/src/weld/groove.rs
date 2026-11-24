@@ -817,8 +817,9 @@ fn unbuilt(side: WeldSide, p: Point2, q: Point2, contour: Contour) -> SolidError
 /// comes within the crossing check's reach of one of `others`, and whether it does (`false`:
 /// none is touched up to the half circle, half the chord, which is then the limit). Each side
 /// is grown towards the arcs by twice the near-miss tolerance, so an arc short of the limit is
-/// never flagged by the crossing check; a side leaving a toe is met at its toe angle, as it is
-/// (a shallower arc's circle meets it again only behind the toe). Closed form: the arcs
+/// never flagged by the crossing check. A side leaving a toe is grown back past the toe: the arc
+/// stops at the circle through a point of the side's line behind the toe, far enough behind for
+/// the crossing check to tell its second meeting with the side from the toe. Closed form: the arcs
 /// through `p` and `q` are a pencil of circles, each deeper one below the one before, so the
 /// first that reaches a grown side does so at a vertex's circle or where it is tangent to the
 /// side. The circle of dip `s` has its centre `m + n (R - s)`, `R = (a² + s²) / 2s` (`m` the
@@ -850,9 +851,15 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool)
     let at_toe = |x: Point2| x.distance(p).min(x.distance(q)) <= tol;
     for seg in others {
         let (s0, s1) = (seg.start(), seg.end());
-        // a side leaving a toe: the arc leaves it 2 atan(s / a) below the chord, so it meets a
-        // side leaving at the angle t at s = a tan(t / 2) (a double root of the tangencies
-        // below, so taken directly)
+        // a side leaving a toe at the angle t: the arc leaves the toe 2 atan(s / a) below the
+        // chord, so its circle meets the side's line a second time behind the toe until
+        // s = a tan(t / 2), where that meeting reaches the toe. The crossing check finds it from
+        // a circle of radius R rounded by about R f64::EPSILON, which moves a meeting `b` from
+        // the toe (circle and line at the angle b / 2R there) about 2 f64::EPSILON R² / b along
+        // the line: past `tol` from the toe it reads as a crossing. So the arc stops at the
+        // circle through the side's line `b` behind the toe: `off` plus four times the `b` whose
+        // rounding is `tol`, R taken at a tan(t / 2), and at most `a` (finite for a side all but
+        // along the chord).
         for (toe, other) in [(p, q), (q, p)] {
             let Some(dir) = leaving(seg, toe, tol) else {
                 continue;
@@ -860,7 +867,16 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool)
             let toward = (other - toe) * (1.0 / (2.0 * a));
             let angle = (-dir.dot(n)).atan2(dir.dot(toward));
             if angle > 0.0 && angle < PI {
-                take(a * (0.5 * angle).tan());
+                let dip = a * (0.5 * angle).tan();
+                let r = (a * a + dip * dip) / (2.0 * dip);
+                let behind = (off + 8.0 * f64::EPSILON * r * r / tol).min(a);
+                let w = m - (toe - dir * behind);
+                let wn = w.dot(n);
+                for s in roots(-wn, w.dot(w) - a * a, wn * a * a) {
+                    if s > eps && s <= a + eps {
+                        take(s);
+                    }
+                }
             }
         }
         for x in [s0, s1] {
@@ -1114,7 +1130,7 @@ fn near_miss(eps: f64) -> f64 {
 /// side joins its neighbours at its own ends.
 fn crosses(segs: &[Seg2], group: &[usize], tol: f64) -> bool {
     // each segment's side, and each side's two ends
-    let mut side = Vec::with_capacity(segs.len());
+    let mut side = Vec::new();
     let mut ends: Vec<(Point2, Point2)> = Vec::new();
     for (i, s) in segs.iter().enumerate() {
         let g = group.get(i).copied().unwrap_or(0);

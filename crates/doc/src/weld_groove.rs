@@ -14,6 +14,7 @@
 //! | [`joint_frame`]   | The joint's frame: a plane whose normal is the joint's direction    |
 //! | [`groove_weld`]   | The weld: the groove's walls, its fill and its body                  |
 //! | [`GrooveWeld`]    | What [`groove_weld`] gives                                          |
+//! | [`WeldNote`]      | What the weld tool tells the user about a weld that built           |
 //! | [`GrooveRefusal`] | Why a joint is refused                                              |
 //!
 //! # Not covered
@@ -26,7 +27,9 @@
 
 use std::f64::consts::FRAC_PI_2;
 
-use solidcore_ops::prism::{ChannelFill, FillFailure, FillOptions, PlanarPiece, extrude_planar_regions, fill_channel, planar_edges};
+use solidcore_ops::prism::{
+    ChannelFill, FillFailure, FillNote, FillOptions, FillSide, PlanarPiece, extrude_planar_regions, fill_channel, planar_edges,
+};
 use solidcore_ops::{Body, Order, affine, sweep};
 use solidcore_record::{Plane, Seg2, Vec2, Vec3};
 
@@ -76,7 +79,7 @@ pub enum GrooveRefusal {
     PartsNotAlongside,
     /// The groove cannot be filled as asked ([`FillFailure`]); `fit` is the nearest size that
     /// builds, where there is one.
-    #[error("the groove cannot be filled as asked: {why}{}", fit.map_or(String::new(), |f| format!(" (at most {f} builds)")))]
+    #[error("{}", fill_text(why, *fit))]
     Fill { why: FillFailure, fit: Option<f64> },
     /// An ops call failed.
     #[error(transparent)]
@@ -319,6 +322,88 @@ pub fn groove_weld(picks: [&GroovePick<'_>; 2], options: &FillOptions) -> Result
     };
     let body = extrude_planar_regions(&frame, std::slice::from_ref(&fill.region), -length / 2.0, length / 2.0)?;
     Ok(GrooveWeld { body, frame, fill })
+}
+
+/// What the weld tool tells the user about a groove weld that built ([`GrooveWeld::notes`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WeldNote {
+    /// The note in weld words, sizes in mm.
+    pub text: String,
+    /// A warning: the tool shows it as one and tints the bead (a concave face below a plate's
+    /// surface, which fails ISO 5817 at every quality level).
+    pub warning: bool,
+}
+
+impl GrooveWeld {
+    /// The fill's notes in weld words ([`FillNote`] says them in the kernel's).
+    #[must_use]
+    pub fn notes(&self) -> Vec<WeldNote> {
+        self.fill.notes.iter().map(weld_note).collect()
+    }
+}
+
+/// A fill face in weld words.
+fn face_name(side: FillSide) -> &'static str {
+    match side {
+        FillSide::Face => "weld face",
+        FillSide::Second => "root-side weld face",
+    }
+}
+
+/// One fill note in weld words.
+fn weld_note(note: &FillNote) -> WeldNote {
+    let (text, warning) = match *note {
+        FillNote::DeeperThanChannel { asked, channel } => {
+            (format!("a depth of {asked:.2} mm is deeper than the groove ({channel:.2} mm): the whole groove is filled"), false)
+        }
+        FillNote::DeeperThanOpening { asked, opening } => {
+            (format!("a depth of {asked:.2} mm is past the root ({opening:.2} mm): full penetration, the groove is filled through"), false)
+        }
+        FillNote::BuiltFlat { side, asked } => {
+            (format!("the {} asked {asked:.2} mm high or deep is within the model tolerance: built flat", face_name(side)), false)
+        }
+        FillNote::BelowToes { side, depth, below: [left, right], .. } if left > 0.0 || right > 0.0 => (
+            format!(
+                "the concave {} dips {depth:.2} mm below the chord, {left:.2} mm below the left plate's surface and {right:.2} mm \
+                 below the right one's: an incompletely filled groove (ISO 6520-1 no. 511), which fails ISO 5817 at every \
+                 quality level",
+                face_name(side)
+            ),
+            true,
+        ),
+        FillNote::BelowToes { side, depth, .. } => {
+            (format!("the concave {} dips {depth:.2} mm below the chord, not below either plate's surface", face_name(side)), false)
+        }
+        // shortcut: a note the kernel adds later shows in its own words until it gets weld words
+        _ => (format!("{note:?}"), false),
+    };
+    WeldNote { text, warning }
+}
+
+/// Why a fill is refused, in weld words, with the size that builds where there is one.
+fn fill_text(why: &FillFailure, fit: Option<f64>) -> String {
+    let text = match *why {
+        FillFailure::ConcaveFaceCrossesWall { side, depth } => {
+            format!("a concave {} {depth:.2} mm deep reaches the groove's sides", face_name(side))
+        }
+        FillFailure::ConcaveFaceTooDeep { side, depth } => {
+            format!("a concave {} {depth:.2} mm deep dips past half a circle across the groove", face_name(side))
+        }
+        FillFailure::FaceTooShallow { side, size } => {
+            format!("a {} {size:.2} mm high or deep is too small to model as an arc and too large to build flat", face_name(side))
+        }
+        FillFailure::ConvexFaceTooHigh { side, height } => {
+            format!("a convex {} {height:.2} mm high rises past half a circle across the groove", face_name(side))
+        }
+        FillFailure::BlendedToesOffChord { side } => {
+            format!("blended toes on the {} need the plate surfaces beside the toes to run level with the line between them", face_name(side))
+        }
+        _ => why.to_string(),
+    };
+    match fit {
+        Some(f) => format!("the groove cannot be filled as asked: {text}; {f:.2} mm builds"),
+        None => format!("the groove cannot be filled as asked: {text}"),
+    }
 }
 
 /// A part's wall in the joint's frame, from its toe away from the face: each groove face's

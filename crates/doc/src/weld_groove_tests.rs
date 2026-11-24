@@ -4,7 +4,8 @@
 //! same whatever the order of the picks, mirrored when the parts swap, and a plate not straight
 //! along the joint refused; the weld filling a Y groove flat (its volume in closed form), a fill
 //! the groove cannot take refused with the size that builds, and parts of different length
-//! refused. Ported from the second groove PR's first slice (solidcore
+//! refused; the fill's notes and refusals in weld words (ISO 6520-1 no. 511 as a warning, full
+//! penetration). Ported from the second groove PR's first slice (solidcore
 //! `weld::groove::joint`, never pushed) onto ops reads (#18500).
 
 use solidcore_ops::prism::{Contour, extrude_planar_regions};
@@ -249,4 +250,31 @@ fn parts_of_different_length_are_refused() {
     let (parts, faces) = y_groove_of(100.0);
     let got = weld(&parts, &faces, &flat()).unwrap_err();
     assert_eq!(got, GrooveRefusal::PartsNotAlongside);
+}
+
+#[test]
+fn a_concave_face_below_the_plate_surface_is_a_warning_in_weld_words() {
+    let (parts, faces) = y_groove();
+    let got = weld(&parts, &faces, &FillOptions { face: Contour::Concave { depth: 0.5 }, ..flat() }).unwrap();
+    let notes = got.notes();
+    let warning = notes.iter().find(|n| n.warning).unwrap_or_else(|| panic!("no warning: {notes:?}"));
+    assert!(warning.text.contains("ISO 6520-1 no. 511") && warning.text.contains("ISO 5817"), "{warning:?}");
+    assert!(warning.text.contains("0.50 mm below the left plate's surface"), "{warning:?}");
+}
+
+#[test]
+fn a_depth_past_the_root_is_full_penetration() {
+    let (parts, faces) = y_groove();
+    let got = weld(&parts, &faces, &FillOptions { depth: Some(20.0), ..flat() }).unwrap();
+    let notes = got.notes();
+    assert!(notes.iter().any(|n| !n.warning && n.text.contains("full penetration")), "{notes:?}");
+}
+
+#[test]
+fn a_fill_refusal_says_what_is_wrong_in_weld_words_and_the_size_that_builds() {
+    let (parts, faces) = y_groove();
+    let got = weld(&parts, &faces, &FillOptions { face: Contour::Concave { depth: 50.0 }, ..flat() }).unwrap_err();
+    let text = got.to_string();
+    assert!(text.starts_with("the groove cannot be filled as asked: a concave weld face 50.00 mm deep"), "{text}");
+    assert!(text.ends_with("mm builds"), "{text}");
 }

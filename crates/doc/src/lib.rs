@@ -141,6 +141,7 @@ pub use sheet_surface_features::OUTSIDE_BEND_OPEN;
 pub mod text_params;
 pub mod thread_forms;
 pub mod tolerance;
+pub mod weld_groove;
 
 pub use assembly::BomType;
 pub use assembly::ExpressedAt;

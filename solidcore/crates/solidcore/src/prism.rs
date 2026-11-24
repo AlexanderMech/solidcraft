@@ -1,7 +1,8 @@
 //! Planar prisms: profiles of lines, arcs, conics and Béziers in a frame's coordinates, the
 //! exact reading of a curve in a plane, a planar sheet read back as regions, a region extruded
-//! between two levels, a channel between two walls filled to a region ([`fill`]), and the
-//! certified section of a body that is a uniform prism.
+//! between two levels, a channel between two walls filled to a region ([`fill`]), the
+//! certified section of a body that is a uniform prism, and straight members: a section run
+//! along a line, its ends where trims and butt joints put them.
 //!
 //! Not upstream: SolidCraft's planar regions and prism measures (`prism_curve.rs`,
 //! `prism_measure.rs` and the geometry of `prism.rs`), moved into the kernel so the layers above
@@ -18,8 +19,10 @@ pub mod export_geometry;
 pub mod extrude;
 pub mod fill;
 pub mod fit;
+pub mod gusset;
 pub mod import_geometry;
 pub mod measure;
+pub mod member;
 pub mod path_export;
 pub mod placement;
 pub mod profile;

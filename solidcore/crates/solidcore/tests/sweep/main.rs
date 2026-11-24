@@ -107,6 +107,8 @@ mod issue_948_ruled_skin_difference;
 mod issue_968_drafted_pocket_floor_cut;
 #[path = "../loft_rails.rs"]
 mod loft_rails;
+#[path = "../prism_fill.rs"]
+mod prism_fill;
 #[path = "../screw_sweep.rs"]
 mod screw_sweep;
 #[path = "../skin_parallel_sections.rs"]
@@ -127,8 +129,6 @@ mod sweep_two_rails;
 mod sweep_upright;
 #[path = "../taper_profile_line_keeps_its_nurb.rs"]
 mod taper_profile_line_keeps_its_nurb;
-#[path = "../weld_groove.rs"]
-mod weld_groove;
 #[path = "../wr302_rail_returns_past_end_beyond_boss.rs"]
 mod wr302_rail_returns_past_end_beyond_boss;
 #[path = "../wr460_untrimmed_rails.rs"]

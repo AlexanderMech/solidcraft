@@ -34,6 +34,11 @@ use crate::nurbs::b_spline_curve::{BSplineCurve, BSplineCurveForm, CanonicalData
 use crate::nurbs::crv_basic::CONIC_ANGLE_TOL_DEG;
 use crate::nurbs::crv_common::DEFAULT_ANGLE_TOL;
 
+mod crossing;
+
+pub use crossing::{loop_crosses, near_miss};
+pub(crate) use crossing::{on_arc, on_seg};
+
 const OP_CURVE: &str = "prism::profile::curve_on_frame";
 const OP_AREA: &str = "prism::profile::Loop2::signed_area";
 

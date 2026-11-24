@@ -1,7 +1,6 @@
-//! Groove welds (`weld::groove`): the section of every standard groove and of grooves that
-//! match no standard against closed-form areas, the contour of each face (a weld from one side
-//! has a flat root, a weld from both sides a second face of its own), the penetration depth and
-//! its notices, and the refusals.
+//! Channel fills (`prism::fill`): the section of every standard groove and of grooves that
+//! match no standard against closed-form areas, the contour of each face (a flat root, or a
+//! second face of its own), the depth `s` and its notes, and the refusals.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -14,10 +13,10 @@ use std::f64::consts::{FRAC_PI_2, PI};
 use solidcore::error::Reason;
 use solidcore::error::Result;
 use solidcore::math::{Point2, Vec2};
-use solidcore::prism::profile::Seg2;
-use solidcore::weld::groove::{
-    fill, Contour, FillOptions, GrooveNote, GrooveSection, GrooveWeld, WeldFailure, WeldSide,
+use solidcore::prism::fill::{
+    fill, Channel, Contour, FillFailure, FillNote, FillOptions, FillSide, Filled,
 };
+use solidcore::prism::profile::Seg2;
 use solidcore::{Kernel, SolidError};
 
 /// Gap between the plates in every example.
@@ -84,7 +83,7 @@ impl Default for Case {
     }
 }
 
-fn weld(left: Vec<Seg2>, right: Vec<Seg2>) -> Case {
+fn channel(left: Vec<Seg2>, right: Vec<Seg2>) -> Case {
     Case {
         left,
         right,
@@ -93,8 +92,8 @@ fn weld(left: Vec<Seg2>, right: Vec<Seg2>) -> Case {
 }
 
 /// The two kernel steps: the groove's section (here built by hand), then the fill.
-fn run(c: &Case) -> Result<GrooveWeld> {
-    let section = GrooveSection {
+fn run(c: &Case) -> Result<Filled> {
+    let section = Channel {
         left: c.left.clone(),
         right: c.right.clone(),
         plate_normal: c.plate_normal,
@@ -107,7 +106,7 @@ fn run(c: &Case) -> Result<GrooveWeld> {
     fill(&Kernel::default(), &section, &options)
 }
 
-fn section(w: &Case) -> GrooveWeld {
+fn section(w: &Case) -> Filled {
     run(w).unwrap()
 }
 
@@ -202,7 +201,7 @@ fn x_walls(t: f64, c: f64) -> (Vec<Seg2>, Vec<Seg2>) {
 fn every_standard_groove_is_filled_to_its_closed_form_area() {
     let t = 6.0;
     let (l, r) = v_walls(t, 60.0, 0.0);
-    let v = weld(l, r);
+    let v = channel(l, r);
     close(area(&v), G * t + t * t * tan(30.0));
     let s = section(&v);
     assert!(s.through);
@@ -210,27 +209,27 @@ fn every_standard_groove_is_filled_to_its_closed_form_area() {
     assert!(s.notes.is_empty());
 
     let (l, r) = bevel_walls(t, 45.0, 0.0);
-    close(area(&weld(l, r)), G * t + t * t / 2.0);
+    close(area(&channel(l, r)), G * t + t * t / 2.0);
 
     let c = 2.0;
     let (l, r) = v_walls(t, 60.0, c);
-    close(area(&weld(l, r)), G * t + (t - c) * (t - c) * tan(30.0));
+    close(area(&channel(l, r)), G * t + (t - c) * (t - c) * tan(30.0));
 
     let (l, r) = bevel_walls(t, 45.0, c);
-    close(area(&weld(l, r)), G * t + (t - c) * (t - c) / 2.0);
+    close(area(&channel(l, r)), G * t + (t - c) * (t - c) / 2.0);
 
     let right = u_right();
     close(
-        area(&weld(mirror(&right), right.clone())),
+        area(&channel(mirror(&right), right.clone())),
         G * U_T + 2.0 * u_half_area(),
     );
     let square = vec![line(p(-G / 2.0, 0.0), p(-G / 2.0, -U_T))];
-    close(area(&weld(square, right)), G * U_T + u_half_area());
+    close(area(&channel(square, right)), G * U_T + u_half_area());
 
     let (t2, c2) = (12.0, 2.0);
     let d = (t2 - c2) / 2.0;
     let (l, r) = x_walls(t2, c2);
-    close(area(&weld(l, r)), G * t2 + 2.0 * d * d * tan(30.0));
+    close(area(&channel(l, r)), G * t2 + 2.0 * d * d * tan(30.0));
 
     let k_right = vec![
         line(p(G / 2.0 + d, 0.0), p(G / 2.0, -d)),
@@ -238,7 +237,7 @@ fn every_standard_groove_is_filled_to_its_closed_form_area() {
         line(p(G / 2.0, -d - c2), p(G / 2.0 + d, -t2)),
     ];
     let k_left = vec![line(p(-G / 2.0, 0.0), p(-G / 2.0, -t2))];
-    close(area(&weld(k_left, k_right)), G * t2 + d * d);
+    close(area(&channel(k_left, k_right)), G * t2 + d * d);
 }
 
 #[test]
@@ -263,7 +262,7 @@ fn a_groove_that_matches_no_standard_is_filled_as_modelled() {
                 a.x * b.y - a.y * b.x
             })
             .sum::<f64>();
-    close(area(&weld(left, right)), shoelace);
+    close(area(&channel(left, right)), shoelace);
 
     // a square groove 6 wide whose left plate has its top corner rounded (radius 1)
     let left = vec![
@@ -276,7 +275,7 @@ fn a_groove_that_matches_no_standard_is_filled_as_modelled() {
         line(p(-3.0, -1.0), p(-3.0, -6.0)),
     ];
     let right = vec![line(p(3.0, 0.0), p(3.0, -6.0))];
-    close(area(&weld(left, right)), 36.0 + 1.0 - PI / 4.0);
+    close(area(&channel(left, right)), 36.0 + 1.0 - PI / 4.0);
 }
 
 #[test]
@@ -287,10 +286,10 @@ fn convex_faces_add_their_segments_and_a_one_sided_root_stays_flat() {
     let half = G / 2.0 + t * tan(30.0);
     let w = Case {
         face: Contour::Convex { height: 1.5 },
-        ..weld(l.clone(), r.clone())
+        ..channel(l.clone(), r.clone())
     };
     close(area(&w), groove + segment(half, 1.5));
-    // welded from one side, the root closes the 1 mm gap flat: nothing below the plate
+    // with a flat root, the root closes the 1 mm gap flat: nothing below the plate
     let s = section(&w);
     let lowest = s
         .region
@@ -302,7 +301,7 @@ fn convex_faces_add_their_segments_and_a_one_sided_root_stays_flat() {
     assert!((lowest + t).abs() < 1e-12, "root at {lowest}");
     assert!(s.notes.is_empty());
 
-    // welded from both sides: each face follows its own contour, flat by default
+    // with a second face: each face follows its own contour, flat by default
     let (t2, c2) = (12.0, 2.0);
     let d = (t2 - c2) / 2.0;
     let (l, r) = x_walls(t2, c2);
@@ -311,18 +310,18 @@ fn convex_faces_add_their_segments_and_a_one_sided_root_stays_flat() {
     let w = Case {
         face: Contour::Convex { height: 1.0 },
         second_face: Some(Contour::Convex { height: 1.2 }),
-        ..weld(l.clone(), r.clone())
+        ..channel(l.clone(), r.clone())
     };
     close(area(&w), x_groove + segment(half, 1.0) + segment(half, 1.2));
     let w = Case {
         face: Contour::Convex { height: 1.0 },
         second_face: Some(Contour::Flat),
-        ..weld(l.clone(), r.clone())
+        ..channel(l.clone(), r.clone())
     };
     close(area(&w), x_groove + segment(half, 1.0));
     let w = Case {
         second_face: Some(Contour::Convex { height: 1.2 }),
-        ..weld(l, r)
+        ..channel(l, r)
     };
     close(area(&w), x_groove + segment(half, 1.2));
 }
@@ -351,7 +350,7 @@ fn blended_toes_run_out_tangentially_past_the_groove() {
     // the plates' outer faces along the chord (plates in one plane): blended toes build
     let flat = Case {
         plate_normal: Some(Vec2::new(0.0, 1.0)),
-        ..weld(l.clone(), r.clone())
+        ..channel(l.clone(), r.clone())
     };
     // an overlap equal to the crest height (ops' default)
     let w = Case {
@@ -409,7 +408,7 @@ fn blended_toes_run_out_tangentially_past_the_groove() {
             height: h,
             overlap: 0.0,
         },
-        ..weld(l, r)
+        ..channel(l, r)
     };
     close(area(&w), groove + segment(a, h));
 }
@@ -432,25 +431,25 @@ fn a_concave_face_is_built_and_says_how_deep_it_dips() {
     let a = G / 2.0 + t * tan(30.0);
     let w = Case {
         face: Contour::Concave { depth: 1.0 },
-        ..weld(l, r)
+        ..channel(l, r)
     };
     close(area(&w), groove - segment(a, 1.0));
     assert_eq!(
         section(&w).notes,
-        vec![GrooveNote::BelowToes {
-            side: WeldSide::Face,
+        vec![FillNote::BelowToes {
+            side: FillSide::Face,
             depth: 1.0,
             below: [1.0, 1.0],
             ratio: 1.0 / 6.0,
         }]
     );
-    // a weld from both sides with its second face concave says so for that side
+    // a fill with a second face with its second face concave says so for that side
     let (t2, c2) = (12.0, 2.0);
     let d = (t2 - c2) / 2.0;
     let (xl, xr) = x_walls(t2, c2);
     let w = Case {
         second_face: Some(Contour::Concave { depth: 0.5 }),
-        ..weld(xl, xr)
+        ..channel(xl, xr)
     };
     close(
         area(&w),
@@ -458,8 +457,8 @@ fn a_concave_face_is_built_and_says_how_deep_it_dips() {
     );
     assert_eq!(
         section(&w).notes,
-        vec![GrooveNote::BelowToes {
-            side: WeldSide::Second,
+        vec![FillNote::BelowToes {
+            side: FillSide::Second,
             depth: 0.5,
             below: [0.5, 0.5],
             ratio: 0.5 / 12.0,
@@ -474,7 +473,7 @@ fn a_concave_face_across_the_walls_is_refused_with_the_deepest_that_builds() {
     let a = G / 2.0 + t * tan(30.0);
     let w = Case {
         face: Contour::Concave { depth: 3.0 },
-        ..weld(l, r)
+        ..channel(l, r)
     };
     let err = run(&w).unwrap_err();
     let SolidError::Failed(failure) = &err else {
@@ -482,8 +481,8 @@ fn a_concave_face_across_the_walls_is_refused_with_the_deepest_that_builds() {
     };
     assert_eq!(
         failure.reason,
-        Reason::Weld(WeldFailure::ConcaveFaceCrossesWall {
-            side: WeldSide::Face,
+        Reason::Fill(FillFailure::ConcaveFaceCrossesWall {
+            side: FillSide::Face,
             depth: 3.0,
         })
     );
@@ -519,11 +518,11 @@ fn a_penetration_depth_fills_the_groove_only_that_deep() {
     let t = 6.0;
     let (l, r) = v_walls(t, 60.0, 0.0);
     let s = 4.0;
-    // a second face does not apply: the weld ends inside the groove
+    // a second face does not apply: the fill ends inside the groove
     let w = Case {
         depth: Some(s),
         second_face: Some(Contour::Convex { height: 0.8 }),
-        ..weld(l.clone(), r.clone())
+        ..channel(l.clone(), r.clone())
     };
     close(area(&w), G * s + tan(30.0) * (t * t - (t - s) * (t - s)));
     assert!(section(&w).notes.is_empty());
@@ -531,7 +530,7 @@ fn a_penetration_depth_fills_the_groove_only_that_deep() {
     // as deep as the plate: full penetration, nothing to say
     let w = Case {
         depth: Some(t),
-        ..weld(l.clone(), r.clone())
+        ..channel(l.clone(), r.clone())
     };
     close(area(&w), G * t + t * t * tan(30.0));
     assert!(section(&w).notes.is_empty());
@@ -539,12 +538,12 @@ fn a_penetration_depth_fills_the_groove_only_that_deep() {
     // past the plate: full penetration, and the user is told
     let w = Case {
         depth: Some(8.0),
-        ..weld(l, r)
+        ..channel(l, r)
     };
     close(area(&w), G * t + t * t * tan(30.0));
     assert_eq!(
         section(&w).notes,
-        vec![GrooveNote::DeeperThanPlate {
+        vec![FillNote::DeeperThanPlate {
             asked: 8.0,
             plate: 6.0
         }]
@@ -554,7 +553,7 @@ fn a_penetration_depth_fills_the_groove_only_that_deep() {
     let right = u_right();
     let w = Case {
         depth: Some(8.0),
-        ..weld(mirror(&right), right)
+        ..channel(mirror(&right), right)
     };
     let cy = -(U_T - U_C) + U_R;
     // below the round's centre (at -cy) the cut keeps the strip of the round above y = -8
@@ -573,14 +572,14 @@ fn a_depth_past_a_closed_groove_fills_the_groove_and_says_so() {
     let w = Case {
         depth: Some(8.0),
         second_face: Some(Contour::Convex { height: 1.0 }),
-        ..weld(left, right)
+        ..channel(left, right)
     };
     let s = section(&w);
     assert!(!s.through);
     close(area(&w), 36.0 * tan(30.0));
     assert_eq!(
         s.notes,
-        vec![GrooveNote::DeeperThanGroove {
+        vec![FillNote::DeeperThanGroove {
             asked: 8.0,
             groove: 6.0
         }]
@@ -590,7 +589,7 @@ fn a_depth_past_a_closed_groove_fills_the_groove_and_says_so() {
 #[test]
 fn bad_walls_contours_and_depths_are_refused_as_invalid_input() {
     let (l, r) = v_walls(6.0, 60.0, 0.0);
-    let ok = weld(l.clone(), r.clone());
+    let ok = channel(l.clone(), r.clone());
     let cubic = Seg2::Cubic {
         p0: p(-4.0, 0.0),
         p1: p(-3.0, -2.0),
@@ -598,21 +597,21 @@ fn bad_walls_contours_and_depths_are_refused_as_invalid_input() {
         p3: p(-0.5, -6.0),
     };
     let bad = [
-        weld(Vec::new(), r.clone()),
-        weld(vec![cubic], r.clone()),
+        channel(Vec::new(), r.clone()),
+        channel(vec![cubic], r.clone()),
         // a wall whose two pieces do not join
-        weld(
+        channel(
             vec![
                 line(p(-4.0, 0.0), p(-2.0, -3.0)),
                 line(p(-1.9, -3.0), p(-0.5, -6.0)),
             ],
             r.clone(),
         ),
-        weld(vec![line(p(f64::NAN, 0.0), p(-0.5, -6.0))], r.clone()),
+        channel(vec![line(p(f64::NAN, 0.0), p(-0.5, -6.0))], r.clone()),
         // left and right swapped
-        weld(r.clone(), l.clone()),
+        channel(r.clone(), l.clone()),
         // walls that cross each other
-        weld(
+        channel(
             vec![line(p(-4.0, 0.0), p(2.0, -6.0))],
             vec![line(p(4.0, 0.0), p(-2.0, -6.0))],
         ),
@@ -658,8 +657,8 @@ fn polygon(corners: &[Point2]) -> f64 {
         .abs()
 }
 
-/// The lowest point of a weld's section.
-fn lowest(w: &GrooveWeld) -> f64 {
+/// The lowest point of a fill's section.
+fn lowest(w: &Filled) -> f64 {
     w.region
         .outer
         .segs
@@ -681,9 +680,9 @@ fn the_depth_is_measured_from_the_lower_plate_where_the_plates_are_parallel() {
     let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), -2.0), p(G / 2.0, -10.0));
     let unequal = Case {
         plate_normal: up,
-        ..weld(vec![line(l0, lb)], vec![line(r0, rb)])
+        ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
     };
-    // s = 6 from the thinner (lower) plate's face: the weld's bottom level at -8, 6 into the
+    // s = 6 from the thinner (lower) plate's face: the fill's bottom level at -8, 6 into the
     // thinner plate and 8 into the thicker
     let w = Case {
         depth: Some(6.0),
@@ -717,7 +716,7 @@ fn the_depth_is_measured_from_the_lower_plate_where_the_plates_are_parallel() {
     assert!((got.filled_depth - 8.0).abs() < 1e-12);
     assert_eq!(
         got.notes,
-        vec![GrooveNote::DeeperThanPlate {
+        vec![FillNote::DeeperThanPlate {
             asked: 9.0,
             plate: 8.0
         }]
@@ -735,7 +734,7 @@ fn the_depth_is_measured_from_the_lower_plate_where_the_plates_are_parallel() {
     let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), -2.0), p(G / 2.0, -10.0));
     let offset = Case {
         plate_normal: up,
-        ..weld(vec![line(l0, lb)], vec![line(r0, rb)])
+        ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
     };
     let w = Case {
         depth: Some(5.0),
@@ -762,7 +761,7 @@ fn the_depth_is_measured_from_the_lower_plate_where_the_plates_are_parallel() {
     assert!((got.filled_depth - 8.0).abs() < 1e-12);
     assert_eq!(
         got.notes,
-        vec![GrooveNote::DeeperThanPlate {
+        vec![FillNote::DeeperThanPlate {
             asked: 7.0,
             plate: 6.0
         }]
@@ -776,16 +775,16 @@ fn a_concave_face_between_offset_plates_says_how_deep_it_dips_below_each() {
     let w = Case {
         plate_normal: Some(Vec2::new(0.0, 1.0)),
         face: Contour::Concave { depth: 1.0 },
-        ..weld(vec![line(l0, lb)], vec![line(r0, rb)])
+        ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
     };
     let got = section(&w);
-    let [GrooveNote::BelowToes {
+    let [FillNote::BelowToes {
         side, depth, below, ..
     }] = got.notes[..]
     else {
         panic!("{:?}", got.notes);
     };
-    assert_eq!((side, depth), (WeldSide::Face, 1.0));
+    assert_eq!((side, depth), (FillSide::Face, 1.0));
     // the face's lowest point below each plate's face: the plates' step apart, and below the
     // lower plate's face too (the arc leaves the lower toe rising more steeply than the chord
     // falls)
@@ -813,7 +812,7 @@ fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
     ] {
         let err = run(&Case {
             plate_normal: Some(n),
-            ..weld(l.clone(), r.clone())
+            ..channel(l.clone(), r.clone())
         })
         .unwrap_err();
         assert!(
@@ -831,13 +830,13 @@ fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
         let tiny_or_huge = run(&Case {
             plate_normal: Some(n),
             depth: Some(4.0),
-            ..weld(l.clone(), r.clone())
+            ..channel(l.clone(), r.clone())
         })
         .unwrap();
         let unit = run(&Case {
             plate_normal: Some(Vec2::new(0.0, 1.0)),
             depth: Some(4.0),
-            ..weld(l.clone(), r.clone())
+            ..channel(l.clone(), r.clone())
         })
         .unwrap();
         assert_eq!(tiny_or_huge, unit, "{n:?}");
@@ -846,18 +845,18 @@ fn a_plates_normal_that_is_not_finite_or_points_into_the_plates_is_refused() {
     assert!(run(&Case {
         plate_normal: Some(Vec2::new(1e-320, 1e-310)),
         depth: Some(4.0),
-        ..weld(l.clone(), r.clone())
+        ..channel(l.clone(), r.clone())
     })
     .is_ok());
     let one_plane = run(&Case {
         plate_normal: Some(Vec2::new(0.0, 3.0)),
         depth: Some(4.0),
-        ..weld(l.clone(), r.clone())
+        ..channel(l.clone(), r.clone())
     })
     .unwrap();
     let chord = run(&Case {
         depth: Some(4.0),
-        ..weld(l, r)
+        ..channel(l, r)
     })
     .unwrap();
     assert_eq!(one_plane, chord);
@@ -870,7 +869,7 @@ fn a_concave_face_on_square_walls_is_refused_where_it_touches_them() {
     // builds keeps the depth margin from there
     let w = Case {
         face: Contour::Concave { depth: 4.0 },
-        ..weld(
+        ..channel(
             vec![line(p(-3.0, 0.0), p(-3.0, -6.0))],
             vec![line(p(3.0, 0.0), p(3.0, -6.0))],
         )
@@ -881,8 +880,8 @@ fn a_concave_face_on_square_walls_is_refused_where_it_touches_them() {
     };
     assert_eq!(
         failure.reason,
-        Reason::Weld(WeldFailure::ConcaveFaceCrossesWall {
-            side: WeldSide::Face,
+        Reason::Fill(FillFailure::ConcaveFaceCrossesWall {
+            side: FillSide::Face,
             depth: 4.0,
         })
     );
@@ -897,14 +896,14 @@ fn a_concave_face_on_square_walls_is_refused_where_it_touches_them() {
     .is_ok());
 }
 
-/// The typed refusal of a weld, and its fit.
-fn refused(w: &Case) -> (WeldFailure, Option<f64>) {
+/// The typed refusal of a fill, and its fit.
+fn refused(w: &Case) -> (FillFailure, Option<f64>) {
     let err = run(w).unwrap_err();
     let SolidError::Failed(failure) = &err else {
         panic!("not a typed refusal: {err:?}");
     };
-    let Reason::Weld(why) = failure.reason else {
-        panic!("not a weld refusal: {err:?}");
+    let Reason::Fill(why) = failure.reason else {
+        panic!("not a fill refusal: {err:?}");
     };
     (why, err.fit().map(|f| f.size))
 }
@@ -915,7 +914,7 @@ fn a_convex_face_past_half_a_circle_is_refused_with_the_highest_that_builds() {
     let a = G / 2.0 + 6.0 * tan(30.0);
     let flat = Case {
         plate_normal: Some(Vec2::new(0.0, 1.0)),
-        ..weld(l, r)
+        ..channel(l, r)
     };
     // a plain convex face: half the toe distance
     let (why, fit) = refused(&Case {
@@ -924,8 +923,8 @@ fn a_convex_face_past_half_a_circle_is_refused_with_the_highest_that_builds() {
     });
     assert_eq!(
         why,
-        WeldFailure::ConvexFaceTooHigh {
-            side: WeldSide::Face,
+        FillFailure::ConvexFaceTooHigh {
+            side: FillSide::Face,
             height: 4.5
         }
     );
@@ -947,8 +946,8 @@ fn a_convex_face_past_half_a_circle_is_refused_with_the_highest_that_builds() {
     });
     assert_eq!(
         why,
-        WeldFailure::ConvexFaceTooHigh {
-            side: WeldSide::Face,
+        FillFailure::ConvexFaceTooHigh {
+            side: FillSide::Face,
             height: a + 1.5
         }
     );
@@ -973,12 +972,12 @@ fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
     let (l, r) = v_walls(6.0, 60.0, 0.0);
     let (why, fit) = refused(&Case {
         face: blended,
-        ..weld(l, r)
+        ..channel(l, r)
     });
     assert_eq!(
         why,
-        WeldFailure::BlendedToesOffPlane {
-            side: WeldSide::Face
+        FillFailure::BlendedToesOffPlane {
+            side: FillSide::Face
         }
     );
     assert_eq!(fit, None);
@@ -988,12 +987,12 @@ fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
     let (why, _) = refused(&Case {
         face: blended,
         plate_normal: Some(Vec2::new(0.0, 1.0)),
-        ..weld(vec![line(l0, lb)], vec![line(r0, rb)])
+        ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
     });
     assert_eq!(
         why,
-        WeldFailure::BlendedToesOffPlane {
-            side: WeldSide::Face
+        FillFailure::BlendedToesOffPlane {
+            side: FillSide::Face
         }
     );
     // plates of unequal thickness, faces flush: blended toes on the face build, on the second
@@ -1002,7 +1001,7 @@ fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
     let (r0, rb) = (p(G / 2.0 + 8.0 * tan(30.0), 0.0), p(G / 2.0, -8.0));
     let unequal = Case {
         plate_normal: Some(Vec2::new(0.0, 1.0)),
-        ..weld(vec![line(l0, lb)], vec![line(r0, rb)])
+        ..channel(vec![line(l0, lb)], vec![line(r0, rb)])
     };
     assert!(run(&Case {
         face: blended,
@@ -1015,8 +1014,8 @@ fn blended_toes_where_the_plates_do_not_run_along_the_chord_are_refused() {
     });
     assert_eq!(
         why,
-        WeldFailure::BlendedToesOffPlane {
-            side: WeldSide::Second
+        FillFailure::BlendedToesOffPlane {
+            side: FillSide::Second
         }
     );
 }
@@ -1037,16 +1036,10 @@ fn grown(c: &Case) -> f64 {
 
 /// Where a concave face between the toes (-a, 0) and (a, 0) stops against a straight wall
 /// leaving the toe (a, 0) at `angle` degrees below the chord: the circle through the toes and
-/// the point of the wall's line `b` back past the toe, with `b` the growth plus the crossing
-/// check's rounding allowance there, 8 `f64::EPSILON` R² / tol for the radius R of the arc that
-/// touches the wall at the toe (`a tan(angle / 2)` deep). Its centre (0, k) is read from the
-/// three points (not the fill's tangency quadratics).
+/// the point of the wall's line `grown` back past the toe, the wall grown like every side.
+/// Its centre (0, k) is read from the three points (not the fill's tangency quadratics).
 fn toe_touch(c: &Case, a: f64, angle: f64) -> f64 {
-    let off = grown(c);
-    let tol = off / 2.0;
-    let s0 = a * tan(angle / 2.0);
-    let r0 = (a * a + s0 * s0) / (2.0 * s0);
-    let b = (off + 8.0 * f64::EPSILON * r0 * r0 / tol).min(a);
+    let b = grown(c);
     let t = angle.to_radians();
     let (x, y) = (a + b * t.cos(), b * t.sin());
     let k = (x * x + y * y - a * a) / (2.0 * y);
@@ -1060,28 +1053,28 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
     let (why, fit) = refused(&Case {
         face: Contour::Concave { depth: 1.5 },
         depth: Some(1.0),
-        ..weld(l, r)
+        ..channel(l, r)
     });
     assert_eq!(
         why,
-        WeldFailure::ConcaveFaceCrossesWall {
-            side: WeldSide::Face,
+        FillFailure::ConcaveFaceCrossesWall {
+            side: FillSide::Face,
             depth: 1.5
         }
     );
     // the lowest point meets the cut line, grown towards it: the dip falls by the growth
     let (vl, vr) = v_walls(6.0, 60.0, 0.0);
-    let off = grown(&weld(vl, vr));
+    let off = grown(&channel(vl, vr));
     assert!((fit.unwrap() - (1.0 - off - ZONE)).abs() < 1e-12, "{fit:?}");
     // just short of the touch: still the typed refusal (the crossing check never decides)
     let cut = |depth: f64| Case {
         face: Contour::Concave { depth },
         depth: Some(1.0),
-        ..weld(v_walls(6.0, 60.0, 0.0).0, v_walls(6.0, 60.0, 0.0).1)
+        ..channel(v_walls(6.0, 60.0, 0.0).0, v_walls(6.0, 60.0, 0.0).1)
     };
     let (why, fit) = refused(&cut(1.0 - 1e-7));
     assert!(
-        matches!(why, WeldFailure::ConcaveFaceCrossesWall { .. }),
+        matches!(why, FillFailure::ConcaveFaceCrossesWall { .. }),
         "{why:?}"
     );
     let fit = fit.unwrap();
@@ -1096,14 +1089,14 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
     let thin_x = Case {
         face: Contour::Concave { depth: 1.5 },
         second_face: Some(Contour::Concave { depth: 1.5 }),
-        ..weld(l, r)
+        ..channel(l, r)
     };
     let (why, fit) = refused(&thin_x);
     assert!(
         matches!(
             why,
-            WeldFailure::ConcaveFaceCrossesWall {
-                side: WeldSide::Face,
+            FillFailure::ConcaveFaceCrossesWall {
+                side: FillSide::Face,
                 ..
             }
         ),
@@ -1116,7 +1109,7 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
 
     // a square groove 10 wide and 4 deep through the plate: a concave face meets a concave
     // second face 2 high in the middle, at 4 - 2
-    let square = weld(
+    let square = channel(
         vec![line(p(-5.0, 0.0), p(-5.0, -4.0))],
         vec![line(p(5.0, 0.0), p(5.0, -4.0))],
     );
@@ -1127,8 +1120,8 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
     });
     assert_eq!(
         why,
-        WeldFailure::ConcaveFaceCrossesWall {
-            side: WeldSide::Face,
+        FillFailure::ConcaveFaceCrossesWall {
+            side: FillSide::Face,
             depth: 2.0
         }
     );
@@ -1149,8 +1142,8 @@ fn a_concave_face_is_sized_against_every_other_side_of_the_section() {
     let (why, fit) = refused(&second(4.0));
     assert_eq!(
         why,
-        WeldFailure::ConcaveFaceCrossesWall {
-            side: WeldSide::Second,
+        FillFailure::ConcaveFaceCrossesWall {
+            side: FillSide::Second,
             depth: 4.0
         }
     );
@@ -1167,7 +1160,7 @@ fn a_concave_face_that_touches_nothing_builds_up_to_its_half_circle() {
     // circle
     let w = |depth: f64| Case {
         face: Contour::Concave { depth },
-        ..weld(
+        ..channel(
             vec![line(p(-3.0, 0.0), p(-9.0, -6.0))],
             vec![line(p(3.0, 0.0), p(9.0, -6.0))],
         )
@@ -1176,8 +1169,8 @@ fn a_concave_face_that_touches_nothing_builds_up_to_its_half_circle() {
     let (why, fit) = refused(&w(3.5));
     assert_eq!(
         why,
-        WeldFailure::ConcaveFaceTooDeep {
-            side: WeldSide::Face,
+        FillFailure::ConcaveFaceTooDeep {
+            side: FillSide::Face,
             depth: 3.5
         }
     );
@@ -1187,19 +1180,19 @@ fn a_concave_face_that_touches_nothing_builds_up_to_its_half_circle() {
 #[test]
 fn a_face_shallower_than_any_arc_is_built_flat_or_refused_with_the_smallest_arc() {
     let (l, r) = v_walls(6.0, 60.0, 0.0);
-    let flat = area(&weld(l.clone(), r.clone()));
+    let flat = area(&channel(l.clone(), r.clone()));
     // within the zone tolerance: built flat, and the note says so
     for depth in [1e-300, 1e-12, 1e-9, ZONE] {
         let w = Case {
             face: Contour::Concave { depth },
-            ..weld(l.clone(), r.clone())
+            ..channel(l.clone(), r.clone())
         };
         let got = section(&w);
         assert_eq!(area(&w), flat, "{depth}");
         assert_eq!(
             got.notes,
-            vec![GrooveNote::BuiltFlat {
-                side: WeldSide::Face,
+            vec![FillNote::BuiltFlat {
+                side: FillSide::Face,
                 asked: depth
             }]
         );
@@ -1207,7 +1200,7 @@ fn a_face_shallower_than_any_arc_is_built_flat_or_refused_with_the_smallest_arc(
     // a groove 2000 wide: no arc of radius 1e9 or more builds, so past the zone tolerance
     // and below a^2 / 2e9 (5e-4) the face is refused, with that smallest arc (for a concave
     // face too: it is nearer than the deepest that builds)
-    let wide = weld(
+    let wide = channel(
         vec![line(p(-1000.0, 0.0), p(-999.0, -6.0))],
         vec![line(p(1000.0, 0.0), p(999.0, -6.0))],
     );
@@ -1221,8 +1214,8 @@ fn a_face_shallower_than_any_arc_is_built_flat_or_refused_with_the_smallest_arc(
         });
         assert_eq!(
             why,
-            WeldFailure::FaceTooShallow {
-                side: WeldSide::Face,
+            FillFailure::FaceTooShallow {
+                side: FillSide::Face,
                 size: 1e-4
             }
         );
@@ -1246,7 +1239,7 @@ fn the_fit_of_a_convex_face_builds_when_retried() {
     let (l, r) = v_walls(6.0, 60.0, 0.0);
     let flat = Case {
         plate_normal: Some(Vec2::new(0.0, 1.0)),
-        ..weld(l, r)
+        ..channel(l, r)
     };
     for face in [
         Contour::Convex { height: 9.0 },
@@ -1287,7 +1280,7 @@ fn a_face_is_checked_against_the_walls_as_built_not_as_its_chord() {
         let right = mirror(&left);
         Case {
             plate_normal: Some(Vec2::new(0.0, 1.0)),
-            ..weld(left, right)
+            ..channel(left, right)
         }
     };
     // a blended toe runs out under the wall's overhang and crosses it: refused
@@ -1309,7 +1302,7 @@ fn a_face_is_checked_against_the_walls_as_built_not_as_its_chord() {
     .is_ok());
 }
 
-/// Retries a refused weld at its fit until it builds (at most three times): the last weld.
+/// Retries a refused fill at its fit until it builds (at most three times): the last fill.
 fn retry_until_built(mut w: Case, at: fn(f64) -> Contour) -> (Case, usize) {
     for tries in 0..3 {
         let Err(err) = run(&w) else {
@@ -1327,14 +1320,14 @@ fn a_shallow_concave_face_and_what_it_touches_agree_on_one_fit_that_builds() {
     let w = Case {
         face: Contour::Concave { depth: 1e-3 },
         depth: Some(3e-4),
-        ..weld(
+        ..channel(
             vec![line(p(-1000.0, 0.0), p(-999.0, -6.0))],
             vec![line(p(1000.0, 0.0), p(999.0, -6.0))],
         )
     };
     let (why, fit) = refused(&w);
     assert!(
-        matches!(why, WeldFailure::ConcaveFaceCrossesWall { .. }),
+        matches!(why, FillFailure::ConcaveFaceCrossesWall { .. }),
         "{why:?}"
     );
     assert_eq!(fit, Some(ZONE));
@@ -1344,7 +1337,7 @@ fn a_shallow_concave_face_and_what_it_touches_agree_on_one_fit_that_builds() {
         section(&built)
             .notes
             .last()
-            .map(|n| matches!(n, GrooveNote::BuiltFlat { .. })),
+            .map(|n| matches!(n, FillNote::BuiltFlat { .. })),
         Some(true)
     );
 }
@@ -1357,7 +1350,7 @@ fn shallow_blended_toes_build_or_are_refused_with_a_fit_that_builds() {
     };
     let groove = |a: f64| Case {
         plate_normal: Some(Vec2::new(0.0, 1.0)),
-        ..weld(
+        ..channel(
             vec![line(p(-a, 0.0), p(-(a - 1.0), -6.0))],
             vec![line(p(a, 0.0), p(a - 1.0, -6.0))],
         )
@@ -1384,8 +1377,8 @@ fn shallow_blended_toes_build_or_are_refused_with_a_fit_that_builds() {
     });
     assert_eq!(
         why,
-        WeldFailure::FaceTooShallow {
-            side: WeldSide::Face,
+        FillFailure::FaceTooShallow {
+            side: FillSide::Face,
             size: 1e-4
         }
     );
@@ -1434,14 +1427,14 @@ fn a_concave_fit_against_a_wall_builds_on_a_large_section() {
     let w = Case {
         face: Contour::Concave { depth: 3.0 },
         depth: Some(2.0),
-        ..weld(
+        ..channel(
             vec![line(p(-100.0, 0.0), p(-99.0, -200.0))],
             vec![line(p(100.0, 0.0), p(99.0, -200.0))],
         )
     };
     let (why, _) = refused(&w);
     assert!(
-        matches!(why, WeldFailure::ConcaveFaceCrossesWall { .. }),
+        matches!(why, FillFailure::ConcaveFaceCrossesWall { .. }),
         "{why:?}"
     );
     let (_, tries) = retry_until_built(w, |d| Contour::Concave { depth: d });
@@ -1472,11 +1465,11 @@ fn a_concave_fit_against_a_step_in_the_wall_builds_on_every_scale() {
             .collect();
         let w = Case {
             face: Contour::Concave { depth: 0.5 * f },
-            ..weld(mirror(&right), right)
+            ..channel(mirror(&right), right)
         };
         let (why, _) = refused(&w);
         assert!(
-            matches!(why, WeldFailure::ConcaveFaceCrossesWall { .. }),
+            matches!(why, FillFailure::ConcaveFaceCrossesWall { .. }),
             "{f}: {why:?}"
         );
         let (_, tries) = retry_until_built(w, |d| Contour::Concave { depth: d });
@@ -1484,11 +1477,33 @@ fn a_concave_fit_against_a_step_in_the_wall_builds_on_every_scale() {
     }
 }
 
+/// An arc wall of radius `rho` leaving the toe (1, 0) at `t` degrees below the chord, towards
+/// the other toe: curving down (away from the chord, `down`) half a unit long, or curving up
+/// (towards it) through half its angle, so that it ends below the chord.
+fn toe_arc(t: f64, rho: f64, down: bool) -> Seg2 {
+    let t = t.to_radians();
+    // the side the centre is on, square to the wall's direction (-cos t, -sin t) at the toe
+    let (side, sweep) = if down {
+        (1.0, (0.5 / rho).min(0.25))
+    } else {
+        (-1.0, -(0.5 / rho).min(0.5 * t))
+    };
+    let center = p(1.0 + side * rho * t.sin(), -side * rho * t.cos());
+    let start = (0.0 - center.y).atan2(1.0 - center.x);
+    Seg2::Arc {
+        center,
+        radius: rho,
+        start,
+        sweep,
+    }
+}
+
 #[test]
 fn concave_fits_build_when_retried_on_every_scale() {
-    // V walls of several slopes (down to about 2 degrees), a square groove, the U groove and the
-    // stepped wall, from 1 to 1e5 wide, each asked for concave faces that reach past what they
-    // touch: every refusal's fit builds
+    // V walls of several slopes (down to 0.002 degrees), arc walls leaving the toe at shallow
+    // angles curving either way (radii 0.5 to 1000 times half the chord), a square groove, the
+    // U groove and the stepped wall, from 1 to 1e5 wide, each asked for concave faces that
+    // reach past what they touch: every refusal's fit builds
     let grow = |wall: Vec<Seg2>, f: f64| -> Vec<Seg2> {
         wall.into_iter()
             .map(|s| match s {
@@ -1527,6 +1542,24 @@ fn concave_fits_build_when_retried_on_every_scale() {
         ] {
             walls.push(vec![line(p(1.0, 0.0), p(1.0 - dx, dy))]);
         }
+        for t in [0.5_f64, 0.05, 0.002] {
+            let t = t.to_radians();
+            walls.push(vec![line(
+                p(1.0, 0.0),
+                p(1.0 - 0.5 * t.cos(), -0.5 * t.sin()),
+            )]);
+        }
+        for t in [5.0_f64, 1.0, 0.05] {
+            for rho in [0.5, 2.0, 10.0, 1000.0] {
+                walls.push(vec![toe_arc(t, rho, true)]);
+                // shortcut: an arc curving up at 0.05 degrees ends 1e-7 of the size below
+                // the chord, its channel a sliver (refused as crossing, without a fit); not
+                // swept until the sliver band (#21152) says what such a channel builds
+                if t > 0.5 {
+                    walls.push(vec![toe_arc(t, rho, false)]);
+                }
+            }
+        }
         for right in walls {
             let right = grow(right, f);
             let top = right.first().map_or(f, |s| s.start().x);
@@ -1535,7 +1568,7 @@ fn concave_fits_build_when_retried_on_every_scale() {
                     let mut w = Case {
                         face: Contour::Concave { depth: want * top },
                         depth,
-                        ..weld(mirror(&right), right.clone())
+                        ..channel(mirror(&right), right.clone())
                     };
                     let mut built = false;
                     for _ in 0..3 {
@@ -1560,4 +1593,33 @@ fn concave_fits_build_when_retried_on_every_scale() {
         }
     }
     assert!(refused_fits.is_empty(), "{refused_fits:?}");
+}
+
+#[test]
+fn concave_fits_build_beside_shallow_and_curved_walls_that_leave_the_toe() {
+    // an arc wall of radius 2 leaving the toe at 0.05 degrees, curving down, and a line wall
+    // at 0.002 degrees 1000 wide: refused with fits that build when retried (brett19's cases on
+    // #18947, 24 Nov)
+    let arc = vec![toe_arc(0.05, 2.0, true)];
+    let t = 0.002_f64.to_radians();
+    let line_wall = vec![line(
+        p(1000.0, 0.0),
+        p(1000.0 - 500.0 * t.cos(), -500.0 * t.sin()),
+    )];
+    for (right, depth) in [(arc, 0.9), (line_wall, 900.0)] {
+        let w = Case {
+            face: Contour::Concave { depth },
+            ..channel(mirror(&right), right.clone())
+        };
+        let err = run(&w).expect_err("past what it touches");
+        let fit = err.fit().expect("a fit").size;
+        assert!(
+            run(&Case {
+                face: Contour::Concave { depth: fit },
+                ..w
+            })
+            .is_ok(),
+            "fit {fit} does not build"
+        );
+    }
 }

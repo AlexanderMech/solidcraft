@@ -1,43 +1,45 @@
-//! Butt and groove welds: one weld across a joint, filling the groove that is already modelled
-//! in the parts.
+//! Filling a channel: the region between two walls, closed across their open ends by a face
+//! of a chosen contour, as a planar section.
 //!
-//! Not upstream: SolidCraft's own (#15132, #18500). The weld is built in two steps: the groove's
-//! section, read from the parts ([`GrooveSection`]), and [`fill`], which fills it with the
-//! user's options and returns the weld ([`GrooveWeld`]). Nothing here sees or changes a part.
-//! For now the section is plain planar geometry the caller passes in (the two walls in the
-//! plane square to the joint). Reading it from the parts, proved constant along a straight
-//! joint, and the body swept along it are the next PR of the series (#18500).
+//! Not upstream: SolidCraft's own (#15132, #18500). Generic geometry for any client: a
+//! [`Channel`] (two walls and, where they have one, the plates' normal) and [`FillOptions`]
+//! (each face's [`Contour`] and a depth) give [`fill`], which returns the filled section
+//! ([`Filled`]) or a typed refusal with the nearest size that builds ([`FillFailure`]). It reads
+//! and changes no body. What the region stands for, and how a refusal is worded to a user, is
+//! the caller's.
 //!
 //! | Rust              | What it is                                                           |
 //! |-------------------|----------------------------------------------------------------------|
-//! | [`GrooveSection`] | The groove across the joint: its two walls and the plates' normal    |
-//! | [`FillOptions`]   | The contour of each face and the penetration depth `s`               |
+//! | [`Channel`]       | The channel: its two walls and the plates' normal                    |
+//! | [`FillOptions`]   | The contour of each face and the depth `s`                           |
 //! | [`Contour`]       | Flat, convex (sharp or blended toes) or concave                      |
-//! | [`fill`]          | The weld: the groove filled, closed by its faces                     |
-//! | [`GrooveWeld`]    | The weld's section, the groove's and the filled depth, its notes     |
-//! | [`GrooveNote`]    | What the weld tool tells the user about a weld it built              |
-//! | [`WeldFailure`]   | Why a weld is refused (shared by every weld type, `error::weld`)     |
+//! | [`fill`]          | The channel filled, closed by its faces                              |
+//! | [`Filled`]        | The filled section, the channel's and the filled depth, its notes    |
+//! | [`FillNote`]      | What a caller may want to report about a fill that built             |
+//! | [`FillFailure`]   | Why a fill is refused (`error::fill`)                                |
 //!
-//! The options have no defaults here: the caller (ops) sets them (a flush face, a blend
-//! overlap equal to the crest height).
+//! The parts it is made of are operations of their own: [`arc_clearance`] (the deepest arc
+//! through two points that clears a set of sides, in closed form), [`close`] (a face from its
+//! contour: a chord, a sagitta arc, or one with blended toes), [`cut_chain`] (a chain of
+//! lines and arcs up to a depth along a direction) and
+//! [`crate::prism::profile::loop_crosses`] (the loop self-crossing check, which the fill and
+//! a retry at a fit both ask).
+//!
+//! The options have no defaults here: the caller sets every one.
 //!
 //! # The geometry
 //!
-//! The weld is generic: it fills whatever groove the walls bound, whatever its shape (V,
-//! bevel, Y, U, J, the double-sided X and K, other angles, steps, rounds). The weld type is a
-//! name for the symbol, not a recipe.
+//! The fill is generic: it fills whatever channel the walls bound, whatever its shape (V,
+//! bevel, Y, U, J, the double-sided X and K, other angles, steps, rounds).
 //!
-//! Each wall is the groove face of one part as it cuts the section plane, a chain of lines and
-//! arcs. It runs from its *toe* on the face side (where the groove face meets the part's outer
-//! face) away from the face. Seen from the face side, `left` is on the left. A wall ends where
-//! the groove ends: on the root side's outer face when the groove runs through the plate, or
-//! where the two parts touch (both walls then end at the same point, the groove is closed).
+//! Each wall is a chain of lines and arcs. It runs from its *toe* on the face side away from
+//! the face. Seen from the face side, `left` is on the left. A wall ends where the channel
+//! ends: on the far side's outer face when the channel runs through the plate, or where the
+//! two walls meet (both walls then end at the same point, the channel is closed).
 //!
-//! The *face* closes the weld between the two toes. Where the groove runs through the plate
-//! the other side is closed between the two wall ends: flat on a weld from one side (its root,
-//! always flush), or by the *second face* of a weld from both sides (a weld symbol above and
-//! below the reference line: X, K, double-U, double-J, or any groove the user welds from both
-//! sides), which follows the user's contour for that side. Each face is [`Contour::Flat`] (a
+//! The *face* closes the region between the two toes. Where the channel runs through the plate
+//! the other side is closed between the two wall ends: flat (the root, always flush), or by a
+//! *second face* of its own contour. Each face is [`Contour::Flat`] (a
 //! straight chord), [`Contour::Convex`] (an arc through the toes with its crest the given
 //! height off the chord), [`Contour::ConvexBlended`] (the same crest, run out tangentially
 //! past the toes) or [`Contour::Concave`] (an arc dipping the given depth below the chord).
@@ -50,20 +52,20 @@
 //! chord between its ends and its bulge (`prism::path_export::bulge_arc`); none is more than
 //! half a circle, so a convex face higher than half the distance between its toes is refused.
 //! The blend runs along the chord's line, so it is built only where the plates' outer faces on
-//! that side do ([`GrooveSection::plate_normal`] given, square to the chord); elsewhere it is
-//! refused ([`WeldFailure::BlendedToesOffPlane`]).
+//! that side do ([`Channel::plate_normal`] given, square to the chord); elsewhere it is
+//! refused ([`FillFailure::BlendedToesOffPlane`]).
 //!
 //! **Penetration depth `s`.** Where the plates' outer faces are parallel (a butt joint,
-//! [`GrooveSection::plate_normal`] given), `s` is measured square to the plates from the face
-//! side's outer face of the lower plate (the one whose toe lies deeper), and the weld's bottom
+//! [`Channel::plate_normal`] given), `s` is measured square to the plates from the face
+//! side's outer face of the lower plate (the one whose toe lies deeper), and the fill's bottom
 //! runs parallel to the plates: plates of unequal thickness or offset get `s` in the plate
 //! whose surface is lower, the other plate more by the step between them. Where they are not
 //! parallel (a bevel groove in a T- or corner joint) it is measured square to the face's chord
-//! from the chord. The weld fills only that deep and the rest of the groove stays empty; the
+//! from the chord. The fill reaches only that deep and the rest of the groove stays empty; the
 //! second face then does not apply. Without `s` the whole groove is filled. An `s` deeper than
 //! a closed groove fills the groove and returns a note; so does an `s` past the depth where a
 //! groove that runs through opens on the root side (the thinner plate's thickness where the
-//! plates' root sides are flush): full penetration. Neither is a refusal. [`GrooveWeld`]
+//! plates' root sides are flush): full penetration. Neither is a refusal. [`Filled`]
 //! returns the depth it filled.
 //!
 //! A concave face is built as asked and returns how deep it dips: below the chord, and below
@@ -72,10 +74,10 @@
 //! where it first touches another side of the section (a wall, the bottom, the other face);
 //! the deepest that builds is `F - δ`, δ the depth margin (the larger of the section's
 //! conservative allowance and the kernel's zone tolerance), refused past it
-//! ([`WeldFailure::ConcaveFaceCrossesWall`]). With nothing touched, the half circle builds and
-//! deeper is refused ([`WeldFailure::ConcaveFaceTooDeep`]). A face no higher or deeper than the
-//! zone tolerance is built flat ([`GrooveNote::BuiltFlat`]); one past that but shallower than
-//! the smallest arc the profile builds is refused ([`WeldFailure::FaceTooShallow`]).
+//! ([`FillFailure::ConcaveFaceCrossesWall`]). With nothing touched, the half circle builds and
+//! deeper is refused ([`FillFailure::ConcaveFaceTooDeep`]). A face no higher or deeper than the
+//! zone tolerance is built flat ([`FillNote::BuiltFlat`]); one past that but shallower than
+//! the smallest arc the profile builds is refused ([`FillFailure::FaceTooShallow`]).
 //!
 //! # Not covered
 //!
@@ -89,14 +91,15 @@ use crate::kernel::Kernel;
 use crate::math::{Point2, Vec2};
 use crate::prism::path_export::{bulge_arc, Vertex};
 use crate::prism::profile::{
-    check_regions, smallest_arc_sweep, Loop2, ProfileRefusal, Region2, Seg2, MAX_ARC_RADIUS,
+    check_regions, loop_crosses, near_miss, on_arc, on_seg, smallest_arc_sweep, Loop2,
+    ProfileRefusal, Region2, Seg2, MAX_ARC_RADIUS,
 };
 
-pub use crate::error::weld::{WeldFailure, WeldSide};
+pub use crate::error::fill::{FillFailure, FillSide};
 
-const OP: &str = "weld::groove";
+const OP: &str = "prism::fill";
 
-/// How one side of the weld is closed between its toes.
+/// How one side of the fill is closed between its toes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Contour {
     /// A straight chord between the toes: flush with plates in one plane.
@@ -120,10 +123,9 @@ pub enum Contour {
     },
 }
 
-/// One groove across its joint, as the weld tool reads it from the parts: the section of the
-/// groove faces in the plane square to the joint.
+/// One channel: its two walls in the section plane.
 #[derive(Debug, Clone, PartialEq)]
-pub struct GrooveSection {
+pub struct Channel {
     /// The left part's groove face in the section plane, from its face-side toe away from the
     /// face: lines and arcs, each starting where the one before ends.
     pub left: Vec<Seg2>,
@@ -136,13 +138,13 @@ pub struct GrooveSection {
     pub plate_normal: Option<Vec2>,
 }
 
-/// How the groove is filled: the user's options, every one set (ops gives the defaults).
+/// How the groove is filled: every option set (the caller gives the defaults).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FillOptions {
     /// The face's contour.
     pub face: Contour,
-    /// The second face's contour for a weld from both sides (a symbol above and below the
-    /// reference line); `None` for a weld from one side, whose root is flat. Used where the
+    /// The second face's contour, closing the far side between the wall ends; `None` for a
+    /// flat root. Used where the
     /// groove runs through the plate and is filled whole.
     pub second_face: Option<Contour>,
     /// The penetration depth `s` (see the module's docs for what it is measured from); `None`
@@ -150,10 +152,10 @@ pub struct FillOptions {
     pub depth: Option<f64>,
 }
 
-/// What the weld tool tells the user about a weld it built.
+/// What a caller may want to report about a fill that built.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
-pub enum GrooveNote {
+pub enum FillNote {
     /// The penetration depth asked for is deeper than the groove, which is closed where the
     /// parts touch: the whole groove is filled, no deeper.
     DeeperThanGroove {
@@ -175,14 +177,14 @@ pub enum GrooveNote {
     /// arc builds that shallow).
     BuiltFlat {
         /// Which side.
-        side: WeldSide,
+        side: FillSide,
         /// The height or depth asked for.
         asked: f64,
     },
     /// A concave contour dips below the chord between its toes.
     BelowToes {
         /// Which side.
-        side: WeldSide,
+        side: FillSide,
         /// How deep below the chord.
         depth: f64,
         /// How deep the face's lowest point lies below each plate's outer face on that side,
@@ -195,23 +197,23 @@ pub enum GrooveNote {
     },
 }
 
-/// A groove weld across its joint.
+/// A filled channel.
 #[derive(Debug, Clone, PartialEq)]
-pub struct GrooveWeld {
-    /// The weld's section: one counter-clockwise loop, no holes.
+pub struct Filled {
+    /// The filled section: one counter-clockwise loop, no holes.
     pub region: Region2,
     /// How deep the groove reaches, measured as the penetration depth is.
     pub groove_depth: f64,
-    /// How deep the weld fills it, measured the same way: the penetration depth where the
-    /// weld ends inside the groove, else the groove's depth.
+    /// How deep it is filled, measured the same way: the depth `s` where the fill ends
+    /// inside the groove, else the groove's depth.
     pub filled_depth: f64,
     /// Whether the groove runs through the plate (the walls end apart).
     pub through: bool,
-    /// What to tell the user.
-    pub notes: Vec<GrooveNote>,
+    /// What a caller may report.
+    pub notes: Vec<FillNote>,
 }
 
-/// The weld that fills `section` with `options`: the groove between its walls filled, closed
+/// The fill of `section` with `options`: the groove between its walls filled, closed
 /// by its faces.
 ///
 /// # Errors
@@ -219,24 +221,24 @@ pub struct GrooveWeld {
 /// [`SolidError::InvalidInput`] for walls that are empty, not lines and arcs, not connected,
 /// not finite, that do not run away from the face, that cross each other, a plates' normal
 /// that is not finite or points into the plates, or a contour or depth that is not finite and
-/// positive. A face this construction does not build is refused as a [`WeldFailure`]: a
-/// convex face past half a circle ([`WeldFailure::ConvexFaceTooHigh`]), a concave face that
-/// reaches the section's other sides ([`WeldFailure::ConcaveFaceCrossesWall`]) or dips past
-/// half a circle ([`WeldFailure::ConcaveFaceTooDeep`]), each with its limit as its [`Fit`], in
+/// positive. A face this construction does not build is refused as a [`FillFailure`]: a
+/// convex face past half a circle ([`FillFailure::ConvexFaceTooHigh`]), a concave face that
+/// reaches the section's other sides ([`FillFailure::ConcaveFaceCrossesWall`]) or dips past
+/// half a circle ([`FillFailure::ConcaveFaceTooDeep`]), each with its limit as its [`Fit`], in
 /// closed form; blended toes where the plates' outer faces do not run along the chord
-/// ([`WeldFailure::BlendedToesOffPlane`]).
-pub fn fill(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<GrooveWeld> {
+/// ([`FillFailure::BlendedToesOffPlane`]).
+pub fn fill(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled> {
     check_input(section, options)?;
     build(k, section, options)
 }
 
-/// The second face's contour: flat on a weld from one side.
+/// The second face's contour: flat without one.
 fn second(options: &FillOptions) -> Contour {
     options.second_face.unwrap_or(Contour::Flat)
 }
 
-/// The weld.
-fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<GrooveWeld> {
+/// The fill.
+fn build(k: &Kernel, section: &Channel, options: &FillOptions) -> Result<Filled> {
     let (left, right) = (&section.left, &section.right);
     let (Some(l0), Some(r0), Some(lb), Some(rb)) = (
         left.first().map(Seg2::start),
@@ -298,7 +300,7 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
         ));
     }
     let through = lb.distance(rb) > eps;
-    // where a groove that runs through opens on the root side: past it the weld is full
+    // where a groove that runs through opens on the root side: past it the fill is full
     // penetration
     let full = if through {
         below(lb).min(below(rb))
@@ -307,7 +309,7 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
     };
     let mut notes = Vec::new();
 
-    // the walls as far as the weld fills them, and the closure at their far ends
+    // the walls as far as the fill reaches, and the closure at their far ends
     let (mut left_wall, mut right_wall) = (left.clone(), right.clone());
     let mut bottom: Vec<Seg2> = Vec::new();
     let mut cut = false;
@@ -338,12 +340,12 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
             filled_depth = s;
         } else if s > full + eps {
             notes.push(if through {
-                GrooveNote::DeeperThanPlate {
+                FillNote::DeeperThanPlate {
                     asked: s,
                     plate: full,
                 }
             } else {
-                GrooveNote::DeeperThanGroove {
+                FillNote::DeeperThanGroove {
                     asked: s,
                     groove: groove_depth,
                 }
@@ -356,18 +358,18 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
     let mut shallow_options = *options;
     let face_floor;
     (shallow_options.face, face_floor) =
-        shallow(WeldSide::Face, l0, r0, options.face, zone, &mut notes)?;
+        shallow(FillSide::Face, l0, r0, options.face, zone, &mut notes)?;
     let mut second_floor = 0.0;
     if second_used {
         let (contour, floor) =
-            shallow(WeldSide::Second, rb, lb, second(options), zone, &mut notes)?;
+            shallow(FillSide::Second, rb, lb, second(options), zone, &mut notes)?;
         shallow_options.second_face = Some(contour);
         second_floor = floor;
     }
     let options = &shallow_options;
     if second_used {
         check_face(
-            WeldSide::Second,
+            FillSide::Second,
             rb,
             lb,
             second(options),
@@ -375,13 +377,13 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
             eps,
         )?;
     }
-    check_face(WeldSide::Face, l0, r0, options.face, plates, eps)?;
+    check_face(FillSide::Face, l0, r0, options.face, plates, eps)?;
     let second_path = if second_used {
-        closure(rb, lb, second(options))
+        close(rb, lb, second(options))
     } else {
         None
     };
-    let face_path = closure(l0, r0, options.face);
+    let face_path = close(l0, r0, options.face);
     // a concave face: the deepest that touches none of the section's other sides
     let walls: Vec<Seg2> = right_wall.iter().chain(&left_wall).copied().collect();
     let mut limits = Vec::new();
@@ -396,8 +398,8 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
         } else {
             others.extend(bottom.iter().copied());
         }
-        let (fit, contact) = concave_limit(l0, r0, &others, eps);
-        limits.push((WeldSide::Face, depth, fit, contact, face_floor));
+        let (fit, contact) = arc_clearance(l0, r0, &others, eps);
+        limits.push((FillSide::Face, depth, fit, contact, face_floor));
     }
     if let (true, Contour::Concave { depth }) = (second_used, second(options)) {
         let mut others = walls;
@@ -406,11 +408,11 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
                 .clone()
                 .unwrap_or_else(|| vec![Seg2::Line { a: l0, b: r0 }]),
         );
-        let (fit, contact) = concave_limit(rb, lb, &others, eps);
-        limits.push((WeldSide::Second, depth, fit, contact, second_floor));
+        let (fit, contact) = arc_clearance(rb, lb, &others, eps);
+        limits.push((FillSide::Second, depth, fit, contact, second_floor));
     }
     // delta, the depth margin a face keeps from what it touches (each side grown by twice the
-    // crossing check's near-miss tolerance, in concave_limit): the larger of the section's
+    // crossing check's near-miss tolerance, in arc_clearance): the larger of the section's
     // conservative allowance (eps, 1e-9 of its size) and the kernel's zone tolerance. A concave
     // face builds from its arc floor up to delta short of the touch (with nothing touched, up
     // to the half circle, which builds). Outside that, its fit is the nearest size that
@@ -427,11 +429,11 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
             continue;
         }
         let why = if depth < floor {
-            WeldFailure::FaceTooShallow { side, size: depth }
+            FillFailure::FaceTooShallow { side, size: depth }
         } else if contact {
-            WeldFailure::ConcaveFaceCrossesWall { side, depth }
+            FillFailure::ConcaveFaceCrossesWall { side, depth }
         } else {
-            WeldFailure::ConcaveFaceTooDeep { side, depth }
+            FillFailure::ConcaveFaceTooDeep { side, depth }
         };
         let fit = if upper < floor {
             zone
@@ -440,14 +442,14 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
         } else {
             upper
         };
-        return Err(Failure::new(OP, Reason::Weld(why))
+        return Err(Failure::new(OP, Reason::Fill(why))
             .with_fit(Fit::new(fit, FitMeasure::Distance, None))
             .into_error());
     }
     if second_used {
-        bottom = second_path.ok_or_else(|| unbuilt(WeldSide::Second, rb, lb, second(options)))?;
+        bottom = second_path.ok_or_else(|| unbuilt(FillSide::Second, rb, lb, second(options)))?;
     }
-    let face = face_path.ok_or_else(|| unbuilt(WeldSide::Face, l0, r0, options.face))?;
+    let face = face_path.ok_or_else(|| unbuilt(FillSide::Face, l0, r0, options.face))?;
 
     // the loop, clockwise: face, right wall down, bottom, left wall up
     let mut segs = face.clone();
@@ -461,7 +463,7 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
     group.extend(right_wall.iter().map(|_| 0));
     group.extend(bottom.iter().map(|_| if second_used { 2 } else { 0 }));
     group.extend(left_wall.iter().map(|_| 0));
-    if crosses(&segs, &group, near_miss(eps)) {
+    if loop_crosses(&segs, &group, near_miss(eps)) {
         return Err(SolidError::invalid_input(
             OP,
             "a section that crosses itself (walls that cross)",
@@ -492,16 +494,16 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
     }
     // a concave face's dip: below the chord, and below each plate's outer face on its side
     for (side, contour, closing, toes, out) in [
-        (WeldSide::Face, options.face, &face, [l0, r0], plates),
+        (FillSide::Face, options.face, &face, [l0, r0], plates),
         (
-            WeldSide::Second,
+            FillSide::Second,
             second(options),
             &bottom,
             [lb, rb],
             plates.map(|n| -n),
         ),
     ] {
-        let used = side == WeldSide::Face || (through && !cut);
+        let used = side == FillSide::Face || (through && !cut);
         let (true, Contour::Concave { depth }) = (used, contour) else {
             continue;
         };
@@ -518,14 +520,14 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
             }
             None => [depth, depth],
         };
-        notes.push(GrooveNote::BelowToes {
+        notes.push(FillNote::BelowToes {
             side,
             depth,
             below: below_toes,
             ratio: depth / groove_depth,
         });
     }
-    Ok(GrooveWeld {
+    Ok(Filled {
         region,
         groove_depth,
         filled_depth,
@@ -534,7 +536,7 @@ fn build(k: &Kernel, section: &GrooveSection, options: &FillOptions) -> Result<G
     })
 }
 
-fn check_input(section: &GrooveSection, options: &FillOptions) -> Result<()> {
+fn check_input(section: &Channel, options: &FillOptions) -> Result<()> {
     let eps = 1e-9 * scale(section.left.iter().chain(&section.right));
     for wall in [&section.left, &section.right] {
         if wall.is_empty() {
@@ -652,11 +654,16 @@ fn deepest_points(s: &Seg2, dir: Vec2) -> Vec<Point2> {
     out
 }
 
-/// The path from `p` to `q` closing one side of the weld, its outside on the left of the run;
-/// `None` for a convex or concave arc past half a circle.
-fn closure(p: Point2, q: Point2, contour: Contour) -> Option<Vec<Seg2>> {
+/// A face closing the run from `p` to `q` with `contour`, its outside on the left of the run:
+/// the chord, a sagitta arc, or the convex arc with blended toes (lines and arcs, joined in
+/// order); `None` for a convex or concave arc past half a circle.
+#[must_use]
+pub fn close(p: Point2, q: Point2, contour: Contour) -> Option<Vec<Seg2>> {
     let chord = q - p;
     let c = chord.length();
+    if !(c.is_finite() && c > 0.0) {
+        return None;
+    }
     let e = chord * (1.0 / c);
     let n = left_normal(e);
     let m = (p + q) * 0.5;
@@ -713,12 +720,12 @@ fn sagitta_arc(p: Point2, q: Point2, sagitta: f64) -> Option<Seg2> {
 /// an infinite radius, dropping `smallest_arc_sweep`'s `zone / R` term: the sweep exceeds that
 /// term for any `a > zone / 2`. The `(1 + 1e-9)` keeps a conservative allowance above it.
 fn shallow(
-    side: WeldSide,
+    side: FillSide,
     p: Point2,
     q: Point2,
     contour: Contour,
     zone: f64,
-    notes: &mut Vec<GrooveNote>,
+    notes: &mut Vec<FillNote>,
 ) -> Result<(Contour, f64)> {
     let (size, overlap) = match contour {
         Contour::Convex { height } => (height, 0.0),
@@ -727,7 +734,7 @@ fn shallow(
         Contour::Flat => return Ok((contour, 0.0)),
     };
     if size <= zone {
-        notes.push(GrooveNote::BuiltFlat { side, asked: size });
+        notes.push(FillNote::BuiltFlat { side, asked: size });
         return Ok((Contour::Flat, 0.0));
     }
     let a = 0.5 * p.distance(q);
@@ -740,7 +747,7 @@ fn shallow(
         * (1.0 + 1e-9);
     if size < floor && !matches!(contour, Contour::Concave { .. }) {
         return Err(
-            Failure::new(OP, Reason::Weld(WeldFailure::FaceTooShallow { side, size }))
+            Failure::new(OP, Reason::Fill(FillFailure::FaceTooShallow { side, size }))
                 .with_fit(Fit::new(floor, FitMeasure::Distance, None))
                 .into_error(),
         );
@@ -753,7 +760,7 @@ fn shallow(
 /// `2 atan(h / (a + o))` reaches a quarter turn there), blended toes only where the plates'
 /// outer faces on that side run along the chord (`out`, their normal, square to it).
 fn check_face(
-    side: WeldSide,
+    side: FillSide,
     p: Point2,
     q: Point2,
     contour: Contour,
@@ -768,7 +775,7 @@ fn check_face(
             if overlap > 0.0 && !along {
                 return Err(Failure::new(
                     OP,
-                    Reason::Weld(WeldFailure::BlendedToesOffPlane { side }),
+                    Reason::Fill(FillFailure::BlendedToesOffPlane { side }),
                 )
                 .into_error());
             }
@@ -780,7 +787,7 @@ fn check_face(
     if height > fit + eps {
         return Err(Failure::new(
             OP,
-            Reason::Weld(WeldFailure::ConvexFaceTooHigh { side, height }),
+            Reason::Fill(FillFailure::ConvexFaceTooHigh { side, height }),
         )
         .with_fit(Fit::new(fit, FitMeasure::Distance, None))
         .into_error());
@@ -790,7 +797,7 @@ fn check_face(
 
 /// Why a face whose limits hold still has no polyline arcs (its arcs a rounding past half a
 /// circle at the limit): a convex face is too high, a concave one too deep, with its fit.
-fn unbuilt(side: WeldSide, p: Point2, q: Point2, contour: Contour) -> SolidError {
+fn unbuilt(side: FillSide, p: Point2, q: Point2, contour: Contour) -> SolidError {
     let a = 0.5 * p.distance(q);
     let (height, overlap) = match contour {
         Contour::Convex { height } => (height, 0.0),
@@ -798,7 +805,7 @@ fn unbuilt(side: WeldSide, p: Point2, q: Point2, contour: Contour) -> SolidError
         Contour::Concave { depth } => {
             return Failure::new(
                 OP,
-                Reason::Weld(WeldFailure::ConcaveFaceTooDeep { side, depth }),
+                Reason::Fill(FillFailure::ConcaveFaceTooDeep { side, depth }),
             )
             .with_fit(Fit::new(a, FitMeasure::Distance, None))
             .into_error();
@@ -807,27 +814,33 @@ fn unbuilt(side: WeldSide, p: Point2, q: Point2, contour: Contour) -> SolidError
     };
     Failure::new(
         OP,
-        Reason::Weld(WeldFailure::ConvexFaceTooHigh { side, height }),
+        Reason::Fill(FillFailure::ConvexFaceTooHigh { side, height }),
     )
     .with_fit(Fit::new(a + overlap, FitMeasure::Distance, None))
     .into_error()
 }
 
-/// The depth where a concave arc from `p` to `q` (dipping on the right of the run) first
-/// comes within the crossing check's reach of one of `others`, and whether it does (`false`:
-/// none is touched up to the half circle, half the chord, which is then the limit). Each side
-/// is grown towards the arcs by twice the near-miss tolerance, so an arc short of the limit is
-/// never flagged by the crossing check. A side leaving a toe is grown back past the toe: the arc
-/// stops at the circle through a point of the side's line behind the toe, far enough behind for
-/// the crossing check to tell its second meeting with the side from the toe. Closed form: the arcs
+/// The deepest circular arc from `p` to `q` (dipping on the right of the run) that clears
+/// `others`, lines and arcs: the depth where the arc first comes within the crossing check's
+/// reach of one of them, and whether it does (`false`: none is touched up to the half circle,
+/// half the chord, which is then the limit). `eps` is the conservative allowance of the
+/// section the sides belong to (as for [`near_miss`]). Each side is grown towards the arcs by
+/// twice the near-miss tolerance, so an arc short of the limit is never flagged by
+/// [`loop_crosses`]; a side that leaves a toe (`p` or `q`) is grown the same way back past the
+/// toe. A caller keeps a depth margin below the limit. `p` and `q` at one point (or not finite)
+/// give `(0, false)`. Closed form: the arcs
 /// through `p` and `q` are a pencil of circles, each deeper one below the one before, so the
 /// first that reaches a grown side does so at a vertex's circle or where it is tangent to the
 /// side. The circle of dip `s` has its centre `m + n (R - s)`, `R = (a² + s²) / 2s` (`m` the
 /// chord's middle, `a` half of it, `n` its normal on the outside); tangency with a line or a
 /// circle is a quadratic in `s`.
-fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool) {
+#[must_use]
+pub fn arc_clearance(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool) {
     let chord = q - p;
     let a = 0.5 * chord.length();
+    if !(a.is_finite() && a > 0.0) {
+        return (0.0, false);
+    }
     let e = chord * (0.5 / a);
     let n = left_normal(e);
     let m = (p + q) * 0.5;
@@ -852,14 +865,12 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool)
     for seg in others {
         let (s0, s1) = (seg.start(), seg.end());
         // a side leaving a toe at the angle t: the arc leaves the toe 2 atan(s / a) below the
-        // chord, so its circle meets the side's line a second time behind the toe until
-        // s = a tan(t / 2), where that meeting reaches the toe. The crossing check finds it from
-        // a circle of radius R rounded by about R f64::EPSILON, which moves a meeting `b` from
-        // the toe (circle and line at the angle b / 2R there) about 2 f64::EPSILON R² / b along
-        // the line: past `tol` from the toe it reads as a crossing. So the arc stops at the
-        // circle through the side's line `b` behind the toe: `off` plus four times the `b` whose
-        // rounding is `tol`, R taken at a tan(t / 2), and at most `a` (finite for a side all but
-        // along the chord).
+        // chord, so it reaches the side's line at the toe at s = a tan(t / 2), short of which
+        // its circle meets that line again only behind the toe. Like every side it is grown
+        // `off` towards the arcs, here back past the toe: the arc stops at the circle through
+        // the side's line `off` behind the toe (a vertex's circle, below). The crossing check
+        // reads that second meeting by deflation from the toe, to a few eps_f64 R, so it tells
+        // it from the toe at any radius.
         for (toe, other) in [(p, q), (q, p)] {
             let Some(dir) = leaving(seg, toe, tol) else {
                 continue;
@@ -867,15 +878,18 @@ fn concave_limit(p: Point2, q: Point2, others: &[Seg2], eps: f64) -> (f64, bool)
             let toward = (other - toe) * (1.0 / (2.0 * a));
             let angle = (-dir.dot(n)).atan2(dir.dot(toward));
             if angle > 0.0 && angle < PI {
-                let dip = a * (0.5 * angle).tan();
-                let r = (a * a + dip * dip) / (2.0 * dip);
-                let behind = (off + 8.0 * f64::EPSILON * r * r / tol).min(a);
-                let w = m - (toe - dir * behind);
+                let w = m - (toe - dir * off);
                 let wn = w.dot(n);
+                let mut found = false;
                 for s in roots(-wn, w.dot(w) - a * a, wn * a * a) {
                     if s > eps && s <= a + eps {
                         take(s);
+                        found = true;
                     }
+                }
+                if !found {
+                    // a side all but along the chord: the touch itself
+                    take(a * (0.5 * angle).tan());
                 }
             }
         }
@@ -1038,9 +1052,12 @@ fn arc_about(center: Point2, p: Point2, q: Point2, ccw: bool) -> Option<Seg2> {
     )
 }
 
-/// `chain` up to where it first reaches `s` below the line through `origin` square to `up`,
-/// ending there; `None` when it never does.
-fn cut_chain(chain: &[Seg2], s: f64, origin: Point2, up: Vec2, eps: f64) -> Option<Vec<Seg2>> {
+/// The chain of lines and arcs `chain` up to where it first reaches `s` below the line through
+/// `origin` square to `up` (a unit vector), ending there; `None` when it never does. `eps` is
+/// the conservative allowance: a chain that reaches `s` within it of its start is `None`, one
+/// that reaches it within it of a segment's end ends at that end.
+#[must_use]
+pub fn cut_chain(chain: &[Seg2], s: f64, origin: Point2, up: Vec2, eps: f64) -> Option<Vec<Seg2>> {
     let below = |p: Point2| -(p - origin).dot(up);
     let mut out = Vec::new();
     for seg in chain {
@@ -1117,192 +1134,4 @@ fn part(seg: &Seg2, t: f64) -> Seg2 {
         },
         other => other,
     }
-}
-
-/// The near-miss tolerance of the crossing check: two sides closer than this meet.
-fn near_miss(eps: f64) -> f64 {
-    eps.max(1e-12) * 100.0
-}
-
-/// Whether the closed loop `segs` crosses or touches itself anywhere but where neighbours
-/// join (`tol` round each join is not looked at). Neighbouring segments of one nonzero
-/// `group` (a face's pieces) are one side: they are not checked against each other, and the
-/// side joins its neighbours at its own ends.
-fn crosses(segs: &[Seg2], group: &[usize], tol: f64) -> bool {
-    // each segment's side, and each side's two ends
-    let mut side = Vec::new();
-    let mut ends: Vec<(Point2, Point2)> = Vec::new();
-    for (i, s) in segs.iter().enumerate() {
-        let g = group.get(i).copied().unwrap_or(0);
-        let joined = i > 0 && g != 0 && group.get(i - 1) == Some(&g);
-        match ends.last_mut() {
-            Some(last) if joined => last.1 = s.end(),
-            _ => ends.push((s.start(), s.end())),
-        }
-        side.push(ends.len() - 1);
-    }
-    let n = ends.len();
-    for (i, a) in segs.iter().enumerate() {
-        for (j, b) in segs.iter().enumerate().skip(i + 1) {
-            let (Some(&u), Some(&v)) = (side.get(i), side.get(j)) else {
-                continue;
-            };
-            let Some(&(start, end)) = ends.get(u) else {
-                continue;
-            };
-            if u == v {
-                continue;
-            }
-            let next = v == u + 1;
-            let wrap = u == 0 && v + 1 == n;
-            let joins: Vec<Point2> = match (next, wrap) {
-                (true, true) => vec![end, start],
-                (true, false) => vec![end],
-                (false, true) => vec![start],
-                (false, false) => Vec::new(),
-            };
-            if meets(a, b, tol)
-                .into_iter()
-                .any(|p| joins.iter().all(|&v| p.distance(v) > tol))
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Where two lines or arcs meet (where they overlap, the ends of the overlap).
-fn meets(a: &Seg2, b: &Seg2, tol: f64) -> Vec<Point2> {
-    let candidates = match (*a, *b) {
-        (Seg2::Line { a: p, b: q }, Seg2::Line { a: r, b: s }) => line_line(p, q, r, s, tol),
-        (Seg2::Line { a: p, b: q }, Seg2::Arc { center, radius, .. })
-        | (Seg2::Arc { center, radius, .. }, Seg2::Line { a: p, b: q }) => {
-            line_circle(p, q, center, radius)
-        }
-        (
-            Seg2::Arc {
-                center: c1,
-                radius: r1,
-                ..
-            },
-            Seg2::Arc {
-                center: c2,
-                radius: r2,
-                ..
-            },
-        ) => {
-            if c1.distance(c2) <= tol && (r1 - r2).abs() <= tol {
-                // one circle: the arcs meet where an end of one lies on the other
-                vec![a.start(), a.end(), b.start(), b.end()]
-            } else {
-                circle_circle(c1, r1, c2, r2)
-            }
-        }
-        _ => Vec::new(),
-    };
-    candidates
-        .into_iter()
-        .filter(|&p| on_seg(a, p, tol) && on_seg(b, p, tol))
-        .collect()
-}
-
-/// Whether `p` lies on the line or arc `s`, within `tol`.
-fn on_seg(s: &Seg2, p: Point2, tol: f64) -> bool {
-    match *s {
-        Seg2::Line { a, b } => {
-            let d = b - a;
-            let len2 = d.length_squared();
-            if len2 == 0.0 {
-                return p.distance(a) <= tol;
-            }
-            let t = (p - a).dot(d) / len2;
-            let near = a + d * t.clamp(0.0, 1.0);
-            p.distance(near) <= tol
-        }
-        Seg2::Arc { center, radius, .. } => {
-            (p.distance(center) - radius).abs() <= tol && on_arc(s, p, tol)
-        }
-        _ => false,
-    }
-}
-
-/// Whether the direction of `p` from an arc's centre lies within its sweep (`tol` along it).
-fn on_arc(s: &Seg2, p: Point2, tol: f64) -> bool {
-    let Seg2::Arc {
-        center,
-        radius,
-        start,
-        sweep,
-    } = *s
-    else {
-        return false;
-    };
-    let d = p - center;
-    let ang = d.y.atan2(d.x);
-    let t = if sweep >= 0.0 {
-        (ang - start).rem_euclid(TAU)
-    } else {
-        (start - ang).rem_euclid(TAU)
-    };
-    let slack = tol / radius;
-    t <= sweep.abs() + slack || t >= TAU - slack
-}
-
-fn line_line(p: Point2, q: Point2, r: Point2, s: Point2, tol: f64) -> Vec<Point2> {
-    let (d1, d2) = (q - p, s - r);
-    let den = d1.x * d2.y - d1.y * d2.x;
-    let scale = d1.length() * d2.length();
-    if den.abs() <= 1e-14 * scale {
-        // parallel: they meet only if they lie on one line, at the ends of the overlap
-        let off = (r - p).x * d1.y - (r - p).y * d1.x;
-        if off.abs() <= tol * d1.length() {
-            return vec![p, q, r, s];
-        }
-        return Vec::new();
-    }
-    let w = r - p;
-    let t = (w.x * d2.y - w.y * d2.x) / den;
-    vec![p + d1 * t]
-}
-
-fn line_circle(p: Point2, q: Point2, c: Point2, r: f64) -> Vec<Point2> {
-    let d = q - p;
-    let f = p - c;
-    let a = d.dot(d);
-    if a == 0.0 {
-        return Vec::new();
-    }
-    let b = 2.0 * f.dot(d);
-    let cc = f.dot(f) - r * r;
-    let disc = b * b - 4.0 * a * cc;
-    if disc < 0.0 {
-        // a near miss within rounding counts as touching at the foot of the centre
-        let t = -b / (2.0 * a);
-        return vec![p + d * t];
-    }
-    let root = disc.sqrt();
-    vec![
-        p + d * ((-b - root) / (2.0 * a)),
-        p + d * ((-b + root) / (2.0 * a)),
-    ]
-}
-
-fn circle_circle(c1: Point2, r1: f64, c2: Point2, r2: f64) -> Vec<Point2> {
-    let d = c2 - c1;
-    let dist = d.length();
-    if dist == 0.0 {
-        return Vec::new();
-    }
-    let a = (dist * dist + r1 * r1 - r2 * r2) / (2.0 * dist);
-    let h2 = r1 * r1 - a * a;
-    let u = d * (1.0 / dist);
-    let mid = c1 + u * a;
-    if h2 < 0.0 {
-        // a near miss within rounding counts as touching on the line of centres
-        return vec![mid];
-    }
-    let h = h2.sqrt();
-    let n = left_normal(u);
-    vec![mid + n * h, mid - n * h]
 }

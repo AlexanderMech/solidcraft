@@ -1,35 +1,33 @@
-//! Why a weld is refused, in solidcore's terms: one enum for every weld type (`crate::weld`).
+//! Why a channel fill (`crate::prism::fill`) is refused, in solidcore's terms.
 //!
-//! Not upstream: SolidCraft's own (#15132, #18500). A weld is display geometry beside the
-//! parts it joins; these say why the weld the user defined cannot be built as defined. Where
-//! a smaller weld builds, the failure's [`Fit`](super::Fit) names it. Bad input (walls that are
-//! not lines and arcs, sizes that are not positive) stays
+//! Not upstream: SolidCraft's own (#15132, #18500). These say why a fill cannot be built as
+//! asked. Where a smaller one builds, the failure's [`Fit`](super::Fit) names it. Bad input
+//! (walls that are not lines and arcs, sizes that are not positive) stays
 //! [`SolidError::InvalidInput`](super::SolidError::InvalidInput).
 //!
 //! | Rust                                      | Status difftest compares |
 //! |-------------------------------------------|--------------------------|
-//! | [`WeldFailure::ConcaveFaceCrossesWall`]   | `SM_ERR` (no C++)        |
-//! | [`WeldFailure::ConcaveFaceTooDeep`]       | `SM_ERR` (no C++)        |
-//! | [`WeldFailure::FaceTooShallow`]           | `SM_ERR` (no C++)        |
-//! | [`WeldFailure::ConvexFaceTooHigh`]        | `SM_ERR` (no C++)        |
-//! | [`WeldFailure::BlendedToesOffPlane`]      | `SM_ERR` (no C++)        |
+//! | [`FillFailure::ConcaveFaceCrossesWall`]   | `SM_ERR` (no C++)        |
+//! | [`FillFailure::ConcaveFaceTooDeep`]       | `SM_ERR` (no C++)        |
+//! | [`FillFailure::FaceTooShallow`]           | `SM_ERR` (no C++)        |
+//! | [`FillFailure::ConvexFaceTooHigh`]        | `SM_ERR` (no C++)        |
+//! | [`FillFailure::BlendedToesOffPlane`]      | `SM_ERR` (no C++)        |
 
 use super::{ErrorKind, SM_ERR};
 
-/// Which side of a weld something is about.
+/// Which face of a fill something is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WeldSide {
-    /// The face (the side the weld is made from; the side its walls start from).
+pub enum FillSide {
+    /// The face (across the toes, the side the walls start from).
     Face,
-    /// The second face of a weld from both sides (a weld symbol above and below the
-    /// reference line).
+    /// The second face, closing the far side between the wall ends.
     Second,
 }
 
-/// Why a weld cannot be built as defined.
+/// Why a fill cannot be built as asked.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
-pub enum WeldFailure {
+pub enum FillFailure {
     /// A concave face `depth` deep reaches the section's other sides (a groove wall, the other
     /// face or the bottom). The face first touches one at a depth `F`, in closed form, each
     /// side grown towards it by twice the crossing check's near-miss tolerance (100 times the
@@ -40,7 +38,7 @@ pub enum WeldFailure {
     /// face is built flat.
     ConcaveFaceCrossesWall {
         /// Which face.
-        side: WeldSide,
+        side: FillSide,
         /// The depth asked for.
         depth: f64,
     },
@@ -48,7 +46,7 @@ pub enum WeldFailure {
     /// fit is the half circle: half the toe distance, which builds.
     ConcaveFaceTooDeep {
         /// Which face.
-        side: WeldSide,
+        side: FillSide,
         /// The depth asked for.
         depth: f64,
     },
@@ -59,7 +57,7 @@ pub enum WeldFailure {
     /// else the zone tolerance (built flat).
     FaceTooShallow {
         /// Which face.
-        side: WeldSide,
+        side: FillSide,
         /// The height or depth asked for.
         size: f64,
     },
@@ -68,7 +66,7 @@ pub enum WeldFailure {
     /// plus the blend's overlap for blended toes.
     ConvexFaceTooHigh {
         /// Which face.
-        side: WeldSide,
+        side: FillSide,
         /// The height asked for.
         height: f64,
     },
@@ -78,13 +76,13 @@ pub enum WeldFailure {
     /// either plate.
     BlendedToesOffPlane {
         /// Which face.
-        side: WeldSide,
+        side: FillSide,
     },
 }
 
-impl WeldFailure {
+impl FillFailure {
     /// The status the C++ reports for it (a comparison detail): `SM_ERR`; the C++ has no
-    /// welds.
+    /// channel fill.
     pub(crate) const fn comparison_status(&self) -> i32 {
         match self {
             Self::ConcaveFaceCrossesWall { .. }
@@ -95,7 +93,7 @@ impl WeldFailure {
         }
     }
 
-    /// Its stable [`ErrorKind`]: a size or a combination the weld does not support.
+    /// Its stable [`ErrorKind`]: a size or a combination the fill does not support.
     #[must_use]
     pub const fn kind(&self) -> ErrorKind {
         match self {
@@ -108,11 +106,11 @@ impl WeldFailure {
     }
 }
 
-impl core::fmt::Display for WeldFailure {
+impl core::fmt::Display for FillFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let name = |side: WeldSide| match side {
-            WeldSide::Face => "face",
-            WeldSide::Second => "second face",
+        let name = |side: FillSide| match side {
+            FillSide::Face => "face",
+            FillSide::Second => "second face",
         };
         match *self {
             Self::ConcaveFaceCrossesWall { side, depth } => write!(

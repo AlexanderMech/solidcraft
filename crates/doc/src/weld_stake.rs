@@ -35,8 +35,9 @@ use crate::weld_seam::{Laid, SeamNotice, SeamPiece, SeamRefusal, add, corners, l
 use crate::weld_spot::{SpotPiece, SpotSide, SpotZone, positive};
 
 /// The weld tolerance a new stake weld site starts with (Q135, model units: mm): a line off the
-/// web's middle by less is snapped without a word.
-pub const WELD_TOLERANCE: f64 = 0.1;
+/// web's middle by less is snapped without a word. The stake's misalignment band
+/// ([`crate::weld_tolerance`]).
+pub const WELD_TOLERANCE: f64 = crate::weld_tolerance::ACCURACY;
 
 /// Why a stake weld is refused.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

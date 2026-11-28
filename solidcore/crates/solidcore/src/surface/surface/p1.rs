@@ -4702,6 +4702,7 @@ impl<'t, 's, O: SolutionObject> SpGlobalSolver<'t, 's, O> {
             surface_cache: None,
             modes: None,
             face_queries: None,
+            leaves_solved: 0,
         }
     }
 }

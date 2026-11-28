@@ -55,6 +55,7 @@ use crate::geom::extent2d::Extent2d;
 use crate::geom::vector2d::Point2;
 use crate::geom::vector3d::{Point3, Vec3};
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::EFF_ZERO_RAD;
 use crate::nurbs::b_spline_curve::BSplineCurve;
 use crate::nurbs::b_spline_surface::BSplineSurface;
@@ -425,7 +426,7 @@ impl FootBlend {
         let planes = straight && flat(&a) && flat(&b);
         if let (true, &[u1, u2]) = (planes, into_faces.as_slice()) {
             let (u1, u2) = (u1.unitize()?, u2.unitize()?);
-            blend.planar = Some(u1.cross(u2).length().atan2(u1.dot(u2)));
+            blend.planar = Some(det::atan2(u1.cross(u2).length(), u1.dot(u2)));
         }
         blend.sides = if first.is_some() && first == b.face {
             [b, a]
@@ -1053,7 +1054,7 @@ impl FootBlend {
                 d *= -1.0;
             }
             let c = other - foot;
-            *toe = c.cross(d).length().atan2(c.dot(d));
+            *toe = det::atan2(c.cross(d).length(), c.dot(d));
         }
         Ok(sagitta_bound(b.distance(a), toes, sagitta))
     }
@@ -1807,7 +1808,7 @@ fn newton(
         }
         let su = (f1 * a22 - f2 * a12) / det;
         let sv = (a11 * f2 - a21 * f1) / det;
-        step = su.hypot(sv);
+        step = det::hypot(su, sv);
         uv = Point2::new(uv.x - su, uv.y - sv);
     }
     Ok(Newton::NotConverged { residual, step, uv })
@@ -3177,6 +3178,7 @@ mod tests {
     use crate::blend::fillet_section::station::Nurbs;
     use crate::geom::extent2d::Extent2d;
     use crate::geom::vector2d::Point2;
+    use crate::math::det;
 
     /// A Newton that stops past a periodic direction's seam has not met the face's end; past
     /// a bounded direction's end (or on it) it has. A foot past the seam is moved into the
@@ -3228,7 +3230,7 @@ mod tests {
         let t = u - k;
         let x = (1.0 - t) * (1.0 - t) + 2.0 * W * t * (1.0 - t);
         let y = 2.0 * W * t * (1.0 - t) + t * t;
-        k * core::f64::consts::FRAC_PI_2 + y.atan2(x)
+        k * core::f64::consts::FRAC_PI_2 + det::atan2(y, x)
     }
 
     /// A rod standing on a plate, as the forms a joint's bound is enclosed on: the plate
@@ -3283,7 +3285,7 @@ mod tests {
     /// The plate's foot at the leader's parameter `s` with the leg `leg`: its `x` and `y`.
     fn plate_foot(s: f64, leg: f64) -> [f64; 2] {
         let (r, c, _) = ROD;
-        let (sin, cos) = angle(s).sin_cos();
+        let (sin, cos) = det::sin_cos(angle(s));
         [c + (r + leg) * cos, c + (r + leg) * sin]
     }
 
@@ -3359,7 +3361,7 @@ mod tests {
     /// The bound on a concave sagitta round the rod with equal legs `leg`, the same at
     /// every parameter: both toes at 45 degrees, `(c / 2) tan(22.5 degrees)`.
     fn rod_bound(leg: f64) -> f64 {
-        leg * core::f64::consts::FRAC_1_SQRT_2 * core::f64::consts::FRAC_PI_8.tan()
+        leg * core::f64::consts::FRAC_1_SQRT_2 * det::tan(core::f64::consts::FRAC_PI_8)
     }
 
     /// A part that runs across a knot of the leader is not enclosed (the leader's model is
@@ -4770,7 +4772,7 @@ impl FootBlend {
             let (a11, a12) = (du.dot(s.tangent), dv.dot(s.tangent));
             let (a21, a22) = (2.0 * w.dot(du), 2.0 * w.dot(dv));
             let det = a11 * a22 - a12 * a21;
-            let scale = (a11.hypot(a21)) * (a12.hypot(a22));
+            let scale = det::hypot(a11, a21) * det::hypot(a12, a22);
             if det.abs() <= 1e-6 * scale {
                 return Ok(Some(s.t));
             }
@@ -5686,7 +5688,7 @@ impl FootBlend {
                 let (rate_a, da) = ivl_mid(r0);
                 let (rate_b, db) = ivl_mid(r1);
                 let ends = (ivl_off(p0, fa) + h / 3.0 * da).max(ivl_off(p1, fb) + h / 3.0 * db);
-                let hermite = h.powi(4) / 16.0 * ivl_norm(a4);
+                let hermite = det::powi(h, 4) / 16.0 * ivl_norm(a4);
                 bound = bound.max(hermite + ends);
                 if bound > tol {
                     return Ok(Chord::Over(bound));
@@ -5965,8 +5967,8 @@ impl FootBlend {
             let mut controls: [[(Vec3, f64); 4]; 5] = [[(Vec3::new(0.0, 0.0, 0.0), 0.0); 4]; 5];
             for (j, ((wp, ww), control)) in whole.iter().zip(controls.iter_mut()).enumerate() {
                 // the Hermite remainder of the row's point and weight
-                let hp = h.powi(4) / 16.0 * ivl_norm(pt(wp, 4));
-                let hw = h.powi(4) / 16.0 * ww.at(4, 0).mag();
+                let hp = det::powi(h, 4) / 16.0 * ivl_norm(pt(wp, 4));
+                let hw = det::powi(h, 4) / 16.0 * ww.at(4, 0).mag();
                 let p0 = pt(wp, 0);
                 let w0 = ww.at(0, 0);
                 if !w0.is_positive() {

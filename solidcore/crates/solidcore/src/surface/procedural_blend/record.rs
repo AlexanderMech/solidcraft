@@ -78,9 +78,10 @@ pub struct RevolutionRecord {
 
 /// The analytic kind of a support, a label beside its NURBS form, which is the support's
 /// one geometric truth: the kernel derives the analytic surface from the form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SupportKindRecord {
     /// No analytic kind: a B-spline surface (or a kind the record keeps as its form only).
+    #[default]
     Free,
     /// A plane.
     Plane,
@@ -92,6 +93,14 @@ pub enum SupportKindRecord {
     Sphere,
     /// A torus.
     Torus,
+}
+
+impl SupportKindRecord {
+    /// Whether it is [`Self::Free`], the kind a foot blend's record without a net kind has.
+    #[must_use]
+    pub fn is_free(&self) -> bool {
+        *self == Self::Free
+    }
 }
 
 /// A surface the ball rolls on: a NURBS form (what the stations are solved on) with its
@@ -1391,13 +1400,20 @@ pub struct FootBlendRecord {
     pub tol: f64,
     /// The motions, in order.
     pub motions: Vec<MotionRecord>,
-    /// The net.
+    /// The net: a B-spline surface, or the NURBS form of the plane that carries the face
+    /// (`net_kind`).
     pub net: NurbsSurfaceRecord,
+    /// The net's kind, a label beside its form: [`SupportKindRecord::Free`], a B-spline
+    /// surface, or [`SupportKindRecord::Plane`], the plane a copy of a flat bead's face is
+    /// (the definition's net is proved to lie in it). Absent (and not written) for a
+    /// B-spline net, so such a record reads and writes as it did before the kind.
+    #[serde(default, skip_serializing_if = "SupportKindRecord::is_free")]
+    pub net_kind: SupportKindRecord,
 }
 
 impl FootBlendRecord {
     /// The structural check: the supports NURBS forms (a foot blend runs on faces), the leader
-    /// and the net as their own checks, the sides `+1` or `-1`, the legs and the tolerance
+    /// and the net as their own checks, the net's kind free or a plane, the sides `+1` or `-1`, the legs and the tolerance
     /// finite and positive, the sagitta finite, the piece and the spans finite, each `a < b`,
     /// the spans ascending and not overlapping (they may touch) and the piece inside one of them, and the motions' numbers
     /// finite. The rebuild checks what the numbers mean (the piece on the leader, the feet, the
@@ -1419,6 +1435,15 @@ impl FootBlendRecord {
         }
         self.leader.validate("leader")?;
         self.net.validate("net")?;
+        if !matches!(
+            self.net_kind,
+            SupportKindRecord::Free | SupportKindRecord::Plane
+        ) {
+            return Err(refuse(
+                "net_kind",
+                "a foot blend's net is a B-spline surface or a plane",
+            ));
+        }
         if !self.sides.iter().all(|s| *s == 1.0 || *s == -1.0) {
             return Err(refuse("sides", "a side is +1 or -1"));
         }

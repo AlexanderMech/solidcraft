@@ -337,7 +337,8 @@ rolling-ball blend, which it leaves unchanged.
 | ends | the end shape at each span's start and end: square, taper or round |
 | tol | the fit tolerance the net was made to |
 | motions | the motions the net took, replayed on the rebuilt net (as a section blend's) |
-| net | the face's net |
+| net | the face's net: a B-spline surface, or the NURBS form of the plane that carries the face |
+| net_kind | absent for a B-spline net (such a record reads and writes as before); `Plane` where the face is a plane |
 
 A weld's spans are asked as fractions of the joint's length and stored as the leader's parameters,
 found by arc length. Square ends are built on any joint. Tapered and rounded ends are built so far
@@ -349,7 +350,13 @@ are refused as not built yet (`BlendFailure::WeldNotBuilt`).
 stored supports and sides, the same refinement, then the motions. A record's net is accepted when
 the rebuilt net is it in some orientation of the parameter square, the same degrees and knots and
 its control points within 10⁻⁸ (1 + the net's size); a record whose legs, sagitta, sides or piece
-were changed is refused. A moved bead keeps its motions, replayed on the rebuilt net; its supports
+were changed is refused. A flat bead's face that a boolean copies can be a plane (`Surface::copy_and_add_analytics`
+recognises a flat net): the copy is that plane only where the definition's net is proved to lie in
+it, every control point of the rebuilt net within the same 10⁻⁸ (1 + the net's size) of the plane
+and its weights positive (`FootBlendDefinition::lies_in_plane`: a certificate, the convex hull, not
+the recogniser's samples); otherwise, and for any other analytic, the copy stays the exact
+B-spline. A plane's record holds the plane's NURBS form with the label `Plane`, and its net is
+accepted on reading by the same certificate. A moved bead keeps its motions, replayed on the rebuilt net; its supports
 and leader stay where it was made, so the definition names no support of the moved face
 (`BlendRef::support` is none, as a section blend's). Only a rigid motion is followed: a scale
 within 10⁻¹² of 1 on every axis (what `transform_matrix` passes for a rotation, whose rows' lengths

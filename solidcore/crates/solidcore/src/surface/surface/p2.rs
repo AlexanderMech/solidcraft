@@ -2079,12 +2079,32 @@ impl Surface {
 
     /// A copy with analytic information where possible (`CopyAndAddAnalytics`).
     ///
+    /// A foot blend's net (a weld bead's section face, #15129) keeps its definition on the
+    /// copy, so its copy is an analytic only where the definition is proved to be that
+    /// analytic. A plane, where the definition's net is proved to lie in it
+    /// ([`crate::blend::foot_blend::FootBlendDefinition::lies_in_plane`], the test its
+    /// re-check runs on a plane; the recogniser that offers the plane only samples). Any
+    /// other analytic, or a plane not proved, is not taken: the copy is the exact B-spline.
+    ///
     /// # Errors
     ///
-    /// Those of the kind's override (the base default is [`Surface::copy`]).
+    /// Those of the kind's override (the base default is [`Surface::copy`]); for a foot
+    /// blend's net offered as a plane, those of the definition's rebuild.
     pub fn copy_and_add_analytics(&self, k: &Kernel) -> Result<Self> {
-        self.copy_and_add_analytics_of_kind(k)
-            .map(|c| self.carry_definition(c))
+        let copy = self.copy_and_add_analytics_of_kind(k)?;
+        if let (Some(KeptDefinition::FootBlend(blend)), SurfaceKind::BSpline(net)) =
+            (self.definition.as_deref(), self.kind())
+        {
+            let proved = match copy.kind() {
+                SurfaceKind::BSpline(_) => true,
+                SurfaceKind::Plane(plane) => blend.lies_in_plane(k, plane)?,
+                _ => false,
+            };
+            if !proved {
+                return Ok(self.carry_definition(Self::from(net.copy())));
+            }
+        }
+        Ok(self.carry_definition(copy))
     }
 
     /// [`Surface::copy_and_add_analytics`] of the kind alone.

@@ -3024,13 +3024,15 @@ impl FootBlendDefinition {
         Ok(net)
     }
 
-    /// Checks `net` against this definition: the net is a B-spline surface, and the rebuilt
-    /// net ([`FootBlendDefinition::rebuild`]) is it, in some orientation of the parameter
-    /// square (the swap and reversals a face's net takes), the same degrees and knots and its
-    /// control points within rounding (`1e-8 (1 + the net's size)`: the rebuild solves the feet
-    /// again, to rounding, and may round differently on another machine). Returns the
-    /// definition's bound ([`FootBlendDefinition::bound`]): the net's fit to the true section
-    /// is the one sampled when it was made, not proved.
+    /// Checks `net` against this definition. A B-spline net: the rebuilt net
+    /// ([`FootBlendDefinition::rebuild`]) is it, in some orientation of the parameter square
+    /// (the swap and reversals a face's net takes), the same degrees and knots and its control
+    /// points within rounding ([`FootBlendDefinition::allowance`]: the rebuild solves the feet
+    /// again, to rounding, and may round differently on another machine). A plane (what a
+    /// copy of a flat bead's face is, [`Surface::copy_and_add_analytics`]): the rebuilt net
+    /// lies in it, proved ([`FootBlendDefinition::lies_in_plane`]'s test, within the same
+    /// allowance). Returns the definition's bound ([`FootBlendDefinition::bound`]): the
+    /// net's fit to the true section is the one sampled when it was made, not proved.
     ///
     /// # Errors
     ///
@@ -3038,10 +3040,31 @@ impl FootBlendDefinition {
     pub fn recertify(&self, k: &Kernel, net: &Surface) -> Result<f64> {
         use crate::surface::surface::p2::SurfaceKind;
         let refuse = |why| SolidError::invalid_input(OP_RECERTIFY, why);
-        let SurfaceKind::BSpline(form) = net.kind() else {
-            return Err(refuse("a foot blend's net is a B-spline surface"));
-        };
+        if !matches!(net.kind(), SurfaceKind::BSpline(_) | SurfaceKind::Plane(_)) {
+            return Err(refuse(
+                "a foot blend's net is a B-spline surface or a plane",
+            ));
+        }
         let rebuilt = self.rebuild(k)?;
+        let eps = self.allowance();
+        match net.kind() {
+            SurfaceKind::BSpline(form) => {
+                match crate::surface::procedural_blend::corner::net_distance(&rebuilt, form) {
+                    Some(d) if d <= eps => Ok(self.tol),
+                    _ => Err(refuse("a foot blend's net is not its definition's")),
+                }
+            }
+            SurfaceKind::Plane(plane) if net_in_plane(&rebuilt, plane, eps) => Ok(self.tol),
+            _ => Err(refuse(
+                "a foot blend's net does not lie in the plane that carries it",
+            )),
+        }
+    }
+
+    /// The rounding [`FootBlendDefinition::recertify`] allows between a net and its rebuild:
+    /// `1e-8 (1 + the net's size)`, the size the larger leg plus the largest coordinate of
+    /// the leader's point at the piece's start.
+    fn allowance(&self) -> f64 {
         let [a, _] = self.interval;
         let [z1, z2] = self.legs;
         let size = z1.max(z2)
@@ -3049,11 +3072,22 @@ impl FootBlendDefinition {
                 .leader
                 .evaluate_point(a)
                 .map_or(0.0, Point3::max_dimension);
-        let eps = 1e-8 * (1.0 + size);
-        match crate::surface::procedural_blend::corner::net_distance(&rebuilt, form) {
-            Some(d) if d <= eps => Ok(self.tol),
-            _ => Err(refuse("a foot blend's net is not its definition's")),
-        }
+        1e-8 * (1.0 + size)
+    }
+
+    /// Whether the net this definition gives lies in `plane`, proved, not sampled: the net
+    /// rebuilt ([`FootBlendDefinition::rebuild`]) has every control point within
+    /// [`FootBlendDefinition::allowance`] of the plane and positive weights, so it lies in
+    /// its control points' convex hull and no point of it is farther from the plane. A flat
+    /// bead on a straight joint between two planes is such a net. The test
+    /// [`FootBlendDefinition::recertify`] runs on a plane.
+    ///
+    /// # Errors
+    ///
+    /// Those of the rebuild: the definition's own refusals, not "not a plane".
+    pub fn lies_in_plane(&self, k: &Kernel, plane: &crate::surface::plane::Plane) -> Result<bool> {
+        let rebuilt = self.rebuild(k)?;
+        Ok(net_in_plane(&rebuilt, plane, self.allowance()))
     }
 
     /// Whether the definition follows a motion of its net with the scale `scale`: none, or 1
@@ -3102,6 +3136,33 @@ impl FootBlendDefinition {
         });
         Ok(())
     }
+}
+
+/// Whether every control point of `net` lies within `eps` of `plane`, the weights positive:
+/// then the net, a convex combination of its control points at every parameter, is within
+/// `eps` of the plane everywhere. `false` where the net has no NURBS data, a weight is not
+/// positive or the plane has no normal.
+fn net_in_plane(net: &BSplineSurface, plane: &crate::surface::plane::Plane, eps: f64) -> bool {
+    use crate::nurbs::math::NOW;
+    let Some(nurb) = net.gw_nurb() else {
+        return false;
+    };
+    let position = plane.position();
+    let origin = position.origin();
+    let Ok(normal) = position.z_axis().unitize() else {
+        return false;
+    };
+    nurb.rows().all(|row| {
+        row.iter().all(|p| {
+            let w = if p.w == NOW { 1.0 } else { p.w };
+            // (a NaN is not within)
+            w > 0.0
+                && (Vec3::new(p.x / w, p.y / w, p.z / w) - origin)
+                    .dot(normal)
+                    .abs()
+                    <= eps
+        })
+    })
 }
 
 #[cfg(test)]

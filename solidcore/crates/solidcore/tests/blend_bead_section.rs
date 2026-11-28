@@ -1926,6 +1926,71 @@ fn a_bead_face_keeps_the_foot_blend_and_rebuilds_from_its_record() {
     }
 }
 
+/// A flat bead's section face that a boolean copies keeps its record. A flat bead (legs 4 and
+/// 6) on the straight joint of a square corner between two planes is united with a block over
+/// its end, the bead as either operand. The union copies the bead's face as a plane, and
+/// only because the definition's net is proved to lie in it; the face still re-checks against
+/// its definition, writes its record, reads back equal and rebuilds as that plane with the
+/// same legs. (While the plane was taken on samples and the record held a B-spline only, the
+/// face kept its definition and could neither write a record nor pass its re-check.)
+#[test]
+fn a_flat_bead_united_with_a_block_keeps_its_record() {
+    use solidcore::blend::foot_blend::WELD_FIT_TOLERANCE;
+    use solidcore::primitive::api_primitives::create_box;
+    use solidcore::surface::procedural_blend::convert::{foot_blend_rebuild, foot_blend_to_record};
+    use solidcore::surface::procedural_blend::record::{FootBlendRecord, SupportKindRecord};
+    use solidcore::surface::surface::SurfaceKind;
+    for first in ["bead", "block"] {
+        let mut k = kernel();
+        let (mut b, at) = corner(&mut k, FRAC_PI_2);
+        let edge = pick(&k, &b, at);
+        let size = ChamferSize::Distances([4.0, 6.0]);
+        let bead = weld_bead_body(&mut k, &mut b, &[edge], &[size], 0.0, &[], &[], SQUARE).unwrap();
+        drop(b);
+        let block = create_box(
+            &mut k,
+            Point3::new(-1.0, -1.0, LENGTH - 5.0),
+            12.0,
+            12.0,
+            10.0,
+        )
+        .unwrap();
+        let body = if first == "bead" {
+            boolean_union(&mut k, bead, block)
+        } else {
+            boolean_union(&mut k, block, bead)
+        }
+        .unwrap();
+        let found = foot_faces(&body);
+        assert_eq!(found.len(), 1, "{first} first");
+        for (_, s) in found {
+            assert!(
+                matches!(s.kind(), SurfaceKind::Plane(_)),
+                "{first} first: the copy is a plane"
+            );
+            let blend = s.procedural_blend().unwrap();
+            assert_eq!(
+                blend.recertify(&k).unwrap(),
+                WELD_FIT_TOLERANCE,
+                "{first} first"
+            );
+            let rec = foot_blend_to_record(&k, &s).unwrap();
+            assert_eq!(rec.net_kind, SupportKindRecord::Plane, "{first} first");
+            let json = serde_json::to_string(&rec).unwrap();
+            let back: FootBlendRecord = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, rec, "{first} first");
+            let rebuilt = foot_blend_rebuild(&k, &back).unwrap();
+            assert!(
+                matches!(rebuilt.kind(), SurfaceKind::Plane(_)),
+                "{first} first: the record reads back as a plane"
+            );
+            let again = rebuilt.procedural_blend().unwrap().foot_blend().unwrap();
+            assert_eq!(again.legs(), [4.0, 6.0], "{first} first");
+            assert_eq!(again.sagitta(), 0.0, "{first} first");
+        }
+    }
+}
+
 /// A foot blend's record whose numbers were changed is refused when rebuilt: a leg, the
 /// sagitta, a side, the face's piece of the leader (its net is not the definition's then);
 /// and records the structural check refuses: a side that is not +1 or -1, a leg that is not

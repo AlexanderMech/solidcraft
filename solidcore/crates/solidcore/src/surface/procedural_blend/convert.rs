@@ -1642,8 +1642,9 @@ const OP_FOOT_FROM: &str = "surface::procedural_blend::convert::foot_blend_from_
 ///
 /// # Errors
 ///
-/// `InvalidInput` for a surface that is not a foot blend's, or a net that is not a B-spline
-/// surface; `Unsupported` for a support with no NURBS form; those of the forms.
+/// `InvalidInput` for a surface that is not a foot blend's, a net that is neither a B-spline
+/// surface nor a plane, or a plane whose NURBS form does not read back as a plane;
+/// `Unsupported` for a support with no NURBS form; those of the forms.
 pub fn foot_blend_to_record(k: &Kernel, surface: &Surface) -> Result<FootBlendRecord> {
     use crate::blend::weld_bead::BeadEnd;
     let Some(BlendRef::FootBlend { blend, net }) = surface.procedural_blend() else {
@@ -1652,11 +1653,30 @@ pub fn foot_blend_to_record(k: &Kernel, surface: &Surface) -> Result<FootBlendRe
             "the surface is not a foot blend's",
         ));
     };
-    let SurfaceKind::BSpline(form) = net.kind() else {
-        return Err(SolidError::invalid_input(
-            OP_FOOT_TO,
-            "a foot blend's net is a B-spline surface",
-        ));
+    // the net as it is: a B-spline surface, or a plane by its NURBS form with the label,
+    // written only where reading derives the plane back from the form
+    let (net_kind, form) = match net.kind() {
+        SurfaceKind::BSpline(form) => (SupportKindRecord::Free, surface_record(form)?),
+        SurfaceKind::Plane(_) => {
+            let SupportRecord::Nurbs {
+                kind: SupportKindRecord::Plane,
+                form,
+                ..
+            } = support_record(k, net, 1)?
+            else {
+                return Err(SolidError::invalid_input(
+                    OP_FOOT_TO,
+                    "a foot blend's plane does not read back from its NURBS form as a plane",
+                ));
+            };
+            (SupportKindRecord::Plane, form)
+        }
+        _ => {
+            return Err(SolidError::invalid_input(
+                OP_FOOT_TO,
+                "a foot blend's net is a B-spline surface or a plane",
+            ))
+        }
     };
     let parts = blend.parts();
     let [s1, s2] = &parts.supports;
@@ -1687,7 +1707,8 @@ pub fn foot_blend_to_record(k: &Kernel, surface: &Surface) -> Result<FootBlendRe
                 scale: m.scale.map(xyz),
             })
             .collect(),
-        net: surface_record(form)?,
+        net: form,
+        net_kind,
     })
 }
 
@@ -1714,8 +1735,8 @@ fn face_surface_of(k: &Kernel, s: &SupportRecord) -> Result<Surface> {
 /// # Errors
 ///
 /// `InvalidInput` for a record its structural check refuses ([`FootBlendRecord::validate`]) or
-/// a support form not of its label's kind; those of making the supports, the leader and the
-/// net.
+/// a support form, or the net's, not of its label's kind; those of making the supports, the
+/// leader and the net.
 pub fn foot_blend_from_record(k: &Kernel, rec: &FootBlendRecord) -> Result<Surface> {
     use crate::blend::foot_blend::{FootBlendDefinition, FootBlendParts};
     use crate::blend::weld_bead::BeadEnd;
@@ -1750,7 +1771,12 @@ pub fn foot_blend_from_record(k: &Kernel, rec: &FootBlendRecord) -> Result<Surfa
             })
             .collect(),
     });
-    let mut net = Surface::from(surface_of(&rec.net)?);
+    let form = surface_of(&rec.net)?;
+    let mut net = if rec.net_kind == SupportKindRecord::Plane {
+        labelled(k, SupportKind::Plane, form)?
+    } else {
+        Surface::from(form)
+    };
     net.set_foot_blend_definition(definition);
     Ok(net)
 }

@@ -183,7 +183,7 @@ mod weld_tests {
         assert_eq!(welds[0].name(), "W12");
         set_label(&mut welds, 7, Some("A-12".into())).unwrap();
         assert_eq!((welds[0].name(), welds[0].number), ("A-12".into(), 12));
-        for taken in ["A-12", "W3", "seventeen bytes!!", ""] {
+        for taken in ["A-12", "W3", "W3 ", " W3", " A-1", "seventeen bytes!!", ""] {
             assert!(set_label(&mut welds, 3, Some(taken.into())).is_err(), "{taken}");
         }
         set_label(&mut welds, 7, None).unwrap();

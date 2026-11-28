@@ -352,9 +352,9 @@ fn plain(name: &str, text: Option<&str>, max: usize) -> Result<(), String> {
     Ok(())
 }
 fn label_valid(label: &str) -> bool {
-    // A label like "W12" would read as another weld's number.
+    // A label like "W12" would read as another weld's number; spaces round it would hide that ("W3 ").
     let number_like = label.strip_prefix('W').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-    plain("label", Some(label), MAX_LABEL_BYTES).is_ok() && !number_like
+    plain("label", Some(label), MAX_LABEL_BYTES).is_ok() && label.trim() == label && !number_like
 }
 fn dimension(v: f64) -> bool {
     v.is_finite() && (MIN_DIMENSION_MM..=MAX_DIMENSION_MM).contains(&v)

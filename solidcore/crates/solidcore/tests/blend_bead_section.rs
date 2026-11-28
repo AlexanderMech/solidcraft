@@ -1569,3 +1569,68 @@ fn a_bead_s_definition_reads_the_body_s_tolerance_not_the_edge_s() {
         }
     }
 }
+
+/// The square corner with every plane written as the B-spline it is (its bilinear NURB over
+/// the plane's own domain, so the edge uses' trims keep their meaning), each net's first
+/// corner moved `off` along the plane's normal (0: exactly flat).
+fn corner_as_flat_splines(k: &mut Kernel, off: f64) -> (Brep, EdgeId) {
+    use solidcore::nurbs::b_spline_curve::ControlPointForm;
+    use solidcore::surface::surface::p2::SurfaceKind;
+    use solidcore::surface::surface::Surface;
+    let (mut b, at) = corner(k, FRAC_PI_2);
+    let e = pick(k, &b, at);
+    let faces: Vec<FaceId> = b.face_list().to_vec();
+    for f in faces {
+        let old = b.face(f).unwrap().surface.clone().unwrap();
+        let SurfaceKind::Plane(p) = old.kind() else {
+            continue;
+        };
+        let mut spline = p.base_with_nurb().unwrap().into_owned();
+        let net = spline.control_point_net().unwrap();
+        let [p00, p01, p10, ..] = net.points[..] else {
+            panic!("a bilinear net");
+        };
+        let n = (p01 - p00).cross(p10 - p00).unitize().unwrap();
+        spline
+            .set_control_point(ControlPointForm::NonRational, 0, 0, p00 + n * off, 1.0)
+            .unwrap();
+        let mut new = Surface::from(spline);
+        new.set_owner(old.owner());
+        b.face_mut(f).unwrap().surface = Some(new);
+    }
+    (b, e)
+}
+
+/// Flat faces written as B-spline surfaces (some exporters write every plane so): a face
+/// whose control points all lie within its tolerance, at least the body's, of the plane at
+/// the edge gets the bead a plane gets, on that exact plane (the face lies in its control
+/// points' hull); one bent 2 times that far off is refused as a joint not between planes,
+/// naming the edge. The corner's file is the same after either.
+#[test]
+fn flat_faces_written_as_b_splines_get_the_bead_of_their_plane() {
+    let size = ChamferSize::Distances([SETBACK; 2]);
+    for (times, builds) in [(0.0, true), (0.5, true), (2.0, false)] {
+        for h in [0.0, 1.0] {
+            let mut k = kernel();
+            let tol = corner(&mut k, FRAC_PI_2).0.tolerance();
+            let (mut b, e) = corner_as_flat_splines(&mut k, times * tol);
+            let before = smb(&k, &b);
+            let got = beads_apart(&mut k, &mut b, &[e], &[size], h, &[]);
+            assert!(smb(&k, &b) == before, "{times} {h}: the corner changed");
+            if builds {
+                let mut body = got.unwrap().remove(0);
+                let want = bead([SETBACK; 2], FRAC_PI_2, h).section_area() * LENGTH;
+                let v = volume(&k, &mut body);
+                assert!(
+                    ((v - want) / want).abs() <= 1e-6,
+                    "{times} {h}: {v} against {want}"
+                );
+                assert_sound(&mut k, &mut body, "the bead on flat B-spline faces");
+            } else {
+                let err = got.unwrap_err();
+                assert_not_built(&err, WeldGap::CurvedJoint);
+                assert_eq!(named_edge(&err), Some(e), "{err:?}");
+            }
+        }
+    }
+}

@@ -55,11 +55,13 @@ use crate::geom::extent2d::Extent2d;
 use crate::geom::vector2d::Point2;
 use crate::geom::vector3d::{Point3, Vec3};
 use crate::kernel::Kernel;
+use crate::math::Vec2;
 use crate::math::EFF_ZERO_RAD;
 use crate::nurbs::b_spline_curve::{BSplineCurve, NurbCircleParam};
 use crate::nurbs::b_spline_surface_n_lib::p2::EvaluateFlags;
 use crate::nurbs::knots::Side;
 use crate::primitive::api_curves::create_line_segment;
+use crate::surface::plane::Plane;
 use crate::surface::procedural_blend::bead::{BeadArc, BeadDefinition, BeadSpan};
 use crate::surface::procedural_blend::chamfer::{ChamferDefinition, ChamferSize};
 use crate::surface::procedural_blend::exact::ExactRound;
@@ -413,7 +415,7 @@ struct Frame {
 /// # Errors
 ///
 /// [`WeldGap::CurvedJoint`] naming the edge for an edge not proved straight ([`straight`]) or
-/// a face on it that is not a plane; [`WeldGap::ObtuseToe`] naming the edge for legs whose toe
+/// a face on it that is neither a plane nor a B-spline proved flat ([`flat_plane`]); [`WeldGap::ObtuseToe`] naming the edge for legs whose toe
 /// is obtuse;
 /// native invalid input for an edge with no curve, not between two faces, or not an inside
 /// corner, and for an `along` that is not one of the edge's faces; [`BlendFailure::SizeBelowResolution`] naming the edge for a leg below the smallest
@@ -455,7 +457,7 @@ fn frame(
     let dir = run.unitize()?;
     // the edge's two faces: each one's direction into it from the edge and its normal
     let middle = interval.evaluate(0.5);
-    let mut sides: Vec<(FaceId, Vec3, Vec3, Surface, Point2)> = Vec::with_capacity(2);
+    let mut sides: Vec<(FaceId, Vec3, Vec3, Surface, Surface, Point2)> = Vec::with_capacity(2);
     // the edge uses on the void's side (the infinite region's shell): their faces' normals
     // point out of the material, whichever way the faces' surfaces run
     let void = target.infinite_region();
@@ -473,11 +475,11 @@ fn frame(
         if sides.iter().any(|s| s.0 == face) {
             continue;
         }
-        let planar = target
-            .face(face)?
-            .surface
-            .as_ref()
-            .is_some_and(|s| matches!(s.kind(), SurfaceKind::Plane(_)));
+        // a B-spline face counts once it is proved flat, below
+        let planar =
+            target.face(face)?.surface.as_ref().is_some_and(|s| {
+                matches!(s.kind(), SurfaceKind::Plane(_) | SurfaceKind::BSpline(_))
+            });
         if !planar {
             return Err(not_built(WeldGap::CurvedJoint, at_edge));
         }
@@ -492,13 +494,17 @@ fn frame(
         // edge use's binormal gives only the side
         let across = eval.face_normal.cross(dir);
         let binormal = across * across.dot(eval.binormal).signum();
-        sides.push((
-            face,
-            binormal.unitize()?,
-            eval.face_normal.unitize()?,
-            surface,
-            eval.uv,
-        ));
+        let normal = eval.face_normal.unitize()?;
+        // the bead's support: the face's plane, or the exact plane a flat B-spline face lies
+        // within its tolerance of (its own surface stays for the toes)
+        let (support, uv) = if matches!(surface.kind(), SurfaceKind::Plane(_)) {
+            (surface.clone(), eval.uv)
+        } else {
+            let tol = target.face(face)?.tolerance.max(target.tolerance());
+            flat_plane(&surface, start, dir, normal, start + run * 0.5, tol)?
+                .ok_or_else(|| not_built(WeldGap::CurvedJoint, at_edge))?
+        };
+        sides.push((face, binormal.unitize()?, normal, surface, support, uv));
     }
     let [first, second] = <[_; 2]>::try_from(sides)
         .map_err(|_| SolidError::invalid_input(OP, "an edge between two faces"))?;
@@ -508,7 +514,7 @@ fn frame(
             "a bead's first leg runs along one of its edge's two faces",
         ));
     }
-    let [(face1, u1, n1, s1, uv1), (face2, u2, _, s2, uv2)] = if along == Some(second.0) {
+    let [(face1, u1, n1, f1, s1, uv1), (face2, u2, _, f2, s2, uv2)] = if along == Some(second.0) {
         [second, first]
     } else {
         [first, second]
@@ -552,7 +558,7 @@ fn frame(
         k,
         target,
         edge_id,
-        [(face1, &s1, u1, d1), (face2, &s2, u2, d2)],
+        [(face1, &f1, u1, d1), (face2, &f2, u2, d2)],
         start,
         run,
     )?;
@@ -590,6 +596,53 @@ fn frame(
         supports: [s1, s2],
         inputs,
     })
+}
+
+/// The plane through `start` with unit normal `normal`, its x axis `dir` (along the edge), and
+/// the uv of `middle` on it, when `surface` is a B-spline with positive weights whose control
+/// points all lie within `tol` of that plane: the surface lies in their convex hull, so the
+/// whole face is that flat, and the bead is built on the plane. `None` otherwise (also for
+/// other kinds).
+///
+/// # Errors
+///
+/// Those of reading the control net.
+fn flat_plane(
+    surface: &Surface,
+    start: Point3,
+    dir: Vec3,
+    normal: Vec3,
+    middle: Point3,
+    tol: f64,
+) -> Result<Option<(Surface, Point2)>> {
+    let SurfaceKind::BSpline(s) = surface.kind() else {
+        return Ok(None);
+    };
+    let net = s.control_point_net()?;
+    if !net.weights.iter().all(|&w| w > 0.0)
+        || !net
+            .points
+            .iter()
+            .all(|&p| (p - start).dot(normal).abs() <= tol)
+    {
+        return Ok(None);
+    }
+    let y = normal.cross(dir);
+    // the domain reaches every control point, so every toe on the face lies inside it
+    let reach = net
+        .points
+        .iter()
+        .map(|&p| p.distance(start))
+        .fold(1.0, f64::max);
+    let plane = Surface::from(Plane::new(
+        start,
+        dir,
+        y,
+        Vec2::new(1.0, 1.0),
+        &Extent2d::from_bounds(-reach, -reach, reach, reach),
+    ));
+    let m = middle - start;
+    Ok(Some((plane, Point2::new(m.dot(dir), m.dot(y)))))
 }
 
 /// Whether `curve` is proved to lie within `tol` of the line through `start` and `end` (its

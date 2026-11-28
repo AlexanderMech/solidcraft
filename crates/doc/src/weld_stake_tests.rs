@@ -2,9 +2,10 @@
 //! onto the web's middle: within the weld tolerance without a word, beyond it with how far, and
 //! refused only when no web lies under the weld's width (the renders' 0.05, 0.5, 1.4 and 2.2 mm);
 //! a web wall split by an edge under the line across the start; an arc over a ring web; a corner
-//! moved to where the moved pieces meet. The snapped path checked whole: a hole in the sheet, a
-//! pocket in its underside, a hole in the web between the ends, a snap that leaves the sheet, a web
-//! apart, overlapping or missing. The bodies on a wide web and on a thin one, cut to it, against
+//! moved to where the moved pieces meet. The snapped path checked whole: a hole in the sheet or a
+//! snap that leaves it, refused; a pocket in its underside, a hole in the web between the ends, a
+//! web apart or overlapping, built with a notice (Q135); a web missing, or apart past the weld's
+//! depth, refused. The bodies on a wide web and on a thin one, cut to it, against
 //! their closed-form volumes, every body through the kernel's check; the refusals.
 
 use std::f64::consts::{PI, TAU};
@@ -204,40 +205,82 @@ fn a_snap_off_the_picked_face_or_through_an_arc_s_centre_is_refused() {
     assert!(matches!(got, Err(StakeRefusal::Invalid(_))), "{got:?}");
 }
 
-/// A pocket 0.4 mm deep in the sheet's underside between the line's ends: refused as uneven, by
-/// 0.4. A hole through the web between the ends, which the path lowered 0.5 mm into the web runs
-/// through: refused, the web 0.5 nearer than at the start.
+/// A pocket 0.4 mm deep in the sheet's underside between the line's ends: built, told the sheet
+/// is uneven by 0.4. A hole through the web between the ends, which the path lowered 0.5 mm into
+/// the web runs through: built, told the web comes 0.5 nearer than at the start.
 #[test]
-fn a_pocket_in_the_sheet_or_a_hole_in_the_web_between_the_ends_is_refused() {
+fn a_pocket_in_the_sheet_or_a_hole_in_the_web_between_the_ends_is_built_with_a_notice() {
     let pocketed = cut(&skin(), &block([-1.0, 2.0, -1.0], [1.0, 4.0, 0.4]));
-    let got = site_on(&pocketed, &web(1.2, 0.0), 0.0);
-    let Err(StakeRefusal::SkinUneven { piece: 0, by }) = got else {
-        panic!("{got:?}");
-    };
-    assert!((by - 0.4).abs() < 1e-6, "{by}");
-    let holed = cut(&web(1.2, 0.0), &block([-1.0, 2.0, -0.8], [1.0, 4.0, -0.2]));
-    let got = site_on(&skin(), &holed, 0.0);
-    let Err(StakeRefusal::WebNotAlong { piece: 0, by }) = got else {
-        panic!("{got:?}");
-    };
-    assert!((by - 0.5).abs() < 1e-6, "{by}");
+    let w = web(1.2, 0.0);
+    let got = site_on(&pocketed, &w, 0.0).unwrap();
+    assert!(matches!(got.notices.as_slice(), [StakeNotice::SkinUneven { piece: 0, by }] if (by - 0.4).abs() < 1e-6), "{got:?}");
+    for piece in built(&got, &pocketed, &w).pieces {
+        check(&piece.body, "pocket");
+    }
+    let holed = cut(&w, &block([-1.0, 2.0, -0.8], [1.0, 4.0, -0.2]));
+    let got = site_on(&skin(), &holed, 0.0).unwrap();
+    assert!(matches!(got.notices.as_slice(), [StakeNotice::WebNotAlong { piece: 0, by }] if (by - 0.5).abs() < 1e-6), "{got:?}");
+    for piece in built(&got, &skin(), &holed).pieces {
+        check(&piece.body, "web hole");
+    }
 }
 
-/// The web's top 0.3 and 0.6 mm under the sheet: apart, with the gap (0.6 is past half the
-/// sheet's thickness, where the line across is probed). 0.05 mm up into the sheet, within the
-/// tolerance: taken. 0.3 mm up: refused with the overlap. A web nowhere across the start: none.
+/// The web's top 0.3 and 0.6 mm under the 1 mm sheet, past the 0.1 mm gap band: built across the
+/// gap, told how far, the zone's part in the web against its closed form from the web's top down
+/// (0.6 is past half the sheet's thickness, where the line across is probed). 0.05 mm up into the
+/// sheet, within the tolerance: no word. 0.3 mm up: built, told the overlap. A web nowhere across
+/// the start: refused.
 #[test]
-fn a_web_apart_overlapping_or_missing_is_refused_with_how_far() {
+fn a_web_apart_or_overlapping_is_built_with_a_notice_and_a_missing_one_is_refused() {
     let s = skin();
     for gap in [0.3, 0.6] {
-        let got = site_on(&s, &web(1.2, -gap), 0.0);
-        assert!(matches!(got, Err(StakeRefusal::WebApart { gap: g }) if (g - gap).abs() < 1e-6), "{gap}: {got:?}");
+        let w = web(1.2, -gap);
+        let got = site_on(&s, &w, 0.0).unwrap();
+        assert!(
+            matches!(got.notices.as_slice(), [StakeNotice::WebApart { gap: g, band }] if (g - gap).abs() < 1e-6 && close(*band, 0.1)),
+            "{gap}: {got:?}"
+        );
+        let stake = built(&got, &s, &w);
+        for piece in &stake.pieces {
+            check(&piece.body, &format!("gap {gap}"));
+        }
+        let [_, _, in_web] = stake.pieces.as_slice() else {
+            panic!("{} pieces", stake.pieces.len());
+        };
+        let want = zone(T + gap, 2.0 * T, 0.6);
+        assert!((volume(&in_web.body) - want).abs() <= 1e-6 * want, "gap {gap}");
     }
-    assert!(site_on(&s, &web(1.2, 0.05), 0.0).is_ok_and(|g| g.moved.is_none()));
-    let got = site_on(&s, &web(1.2, 0.3), 0.0);
-    assert!(matches!(got, Err(StakeRefusal::WebOverlap { by }) if (by - 0.3).abs() < 1e-6), "{got:?}");
+    assert!(site_on(&s, &web(1.2, 0.05), 0.0).is_ok_and(|g| g.moved.is_none() && g.notices.is_empty()));
+    let w = web(1.2, 0.3);
+    let got = site_on(&s, &w, 0.0).unwrap();
+    assert!(matches!(got.notices.as_slice(), [StakeNotice::WebOverlap { by }] if (by - 0.3).abs() < 1e-6), "{got:?}");
+    for piece in built(&got, &s, &w).pieces {
+        check(&piece.body, "overlap");
+    }
     let across = block([-15.0, 5.0, -10.0], [15.0, 6.0, 0.0]);
     assert_eq!(site_on(&s, &across, 0.0), Err(StakeRefusal::NoWebUnder { nearest: None }));
+}
+
+/// The web 1.2 mm under the sheet: the site is taken, told the gap; welded 1 mm deep the weld
+/// meets no web, refused with the depth (Q227); welded 2 mm deep it reaches across.
+#[test]
+fn a_web_apart_past_the_weld_s_depth_is_refused() {
+    let (s, w) = (skin(), web(1.2, -1.2));
+    let site = site_on(&s, &w, 0.0).unwrap();
+    assert!(matches!(site.notices.as_slice(), [StakeNotice::WebApart { gap, .. }] if (gap - 1.2).abs() < 1e-6), "{site:?}");
+    let weld = |depth: f64| StakeWeld {
+        start: site.start,
+        path: site.path.clone(),
+        normal: site.normal,
+        skin: site.skin,
+        depth,
+        width: W,
+        shape: FusionShape::Tapered,
+    };
+    assert!(matches!(stake_weld(&weld(1.0), &s, &w), Err(StakeRefusal::WebOutOfReach { depth }) if close(depth, 1.0)));
+    for piece in stake_weld(&weld(2.0), &s, &w).unwrap().pieces {
+        check(&piece.body, "deep");
+    }
 }
 
 // ---- the bodies ----

@@ -24,6 +24,12 @@
 //! lies under the weld's width, and names how far the nearest web is. The snapped path is checked
 //! whole, by the kernel's exact distances from it to the parts' faces and edges, never at sample
 //! points.
+//!
+//! Fit-up that is a bit off is welded on the real faces with a [`StakeNotice`] (Q135, Q226): a web
+//! standing apart from the top sheet past the gap band ([`crate::weld_tolerance`]: 10 % of the
+//! sheet), one reaching up into it, a sheet not even or a web not whole along the path, past the
+//! weld tolerance. A gap is refused only when the weld cannot reach across it: the web as far or
+//! further under the sheet than the weld's depth (Q227).
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
@@ -33,6 +39,7 @@ use solidcraft_kernel::{Body, BoolOp, KernelError, PointClass, affine, develop, 
 use crate::weld_fusion::{FusionRefusal, FusionShape, FusionWeld, fusion_weld};
 use crate::weld_seam::{Laid, SeamNotice, SeamPiece, SeamRefusal, add, corners, lay, scale};
 use crate::weld_spot::{SpotPiece, SpotSide, SpotZone, positive};
+use crate::weld_tolerance::{Deviation, Family, Joint, Level, Sizes, tolerance as tolerance_band};
 
 /// The weld tolerance a new stake weld site starts with (Q135, model units: mm): a line off the
 /// web's middle by less is snapped without a word. The stake's misalignment band
@@ -55,13 +62,6 @@ pub enum StakeRefusal {
     /// The path starts off the picked face, or, snapped onto the web, starts off the top sheet.
     #[error("the stake weld starts off the picked face of the top sheet: draw it on that face, over the web")]
     OffFace,
-    /// The top sheet is not whole and even under piece `piece` of the snapped path: a hole, a
-    /// pocket, a step or its edge comes `by` nearer its middle than half its thickness, past the
-    /// weld tolerance.
-    #[error(
-        "the top sheet is not whole and even under piece {piece} of the stake weld: something comes {by} into it from its faces; draw it where the sheet is even"
-    )]
-    SkinUneven { piece: usize, by: f64 },
     /// Piece `piece` runs too near the edge of the picked face for the weld's width. `fits` is the
     /// widest weld that fits.
     #[error("piece {piece} of the stake weld runs past the edge of the top sheet's face; at most {fits} wide fits")]
@@ -70,17 +70,10 @@ pub enum StakeRefusal {
     /// web's middle lies from the line, sideways, if the line across the start meets a web at all.
     #[error("no web under the stake weld{}", nearest_text(.nearest))]
     NoWebUnder { nearest: Option<f64> },
-    /// The web does not run whole under piece `piece` of the snapped path: it turns off it, ends,
-    /// or has a hole or a gap there, coming `by` nearer the path than it does at the start, past
-    /// the weld tolerance.
-    #[error("the web does not run whole under piece {piece} of the stake weld (it comes {by} nearer than at the start): draw the path along the web")]
-    WebNotAlong { piece: usize, by: f64 },
-    /// The web stands `gap` under the top sheet at the path's start, past the weld tolerance.
-    #[error("the web stands {gap} under the top sheet: close the gap to the weld tolerance")]
-    WebApart { gap: f64 },
-    /// The web reaches `by` up into the top sheet at the path's start, past the weld tolerance.
-    #[error("the web reaches {by} up into the top sheet: trim it to the sheet's underside")]
-    WebOverlap { by: f64 },
+    /// The web stands as far or further under the top sheet than the weld reaches into it,
+    /// `depth`: the weld meets no metal of the web.
+    #[error("the web stands {depth} or more under the top sheet, out of the stake weld's reach: close the gap to under {depth} or weld deeper")]
+    WebOutOfReach { depth: f64 },
     /// Snapped onto the web, `by` sideways, the pieces at joint `joint` no longer meet, or one of
     /// them runs backwards.
     #[error(
@@ -99,6 +92,30 @@ pub enum StakeRefusal {
     /// A placement call refused its numbers, in the kernel's words.
     #[error(transparent)]
     Placement(#[from] affine::AffineRefused),
+}
+
+/// Something about a stake weld's fit-up the user should know, though it builds on the real faces
+/// (Q135).
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum StakeNotice {
+    /// The web stands `gap` under the top sheet at the path's start, past `band`.
+    #[error("the web stands {gap} under the top sheet, more than {band}: welded across the gap; close it for full fusion")]
+    WebApart { gap: f64, band: f64 },
+    /// The web reaches `by` up into the top sheet at the path's start, past the weld tolerance.
+    #[error("the web reaches {by} up into the top sheet: welded as it is; trim the web to the sheet's underside")]
+    WebOverlap { by: f64 },
+    /// The top sheet is not whole and even under piece `piece` of the snapped path: a hole, a
+    /// pocket, a step or its edge comes `by` nearer its middle than half its thickness, past the
+    /// weld tolerance.
+    #[error("the top sheet is not even under piece {piece} of the stake weld: something comes {by} into it from its faces; welded as it is")]
+    SkinUneven { piece: usize, by: f64 },
+    /// The web does not run whole under piece `piece` of the snapped path: it turns off it, ends,
+    /// or has a hole or a gap there, coming `by` nearer the path than it does at the start, past
+    /// the weld tolerance.
+    #[error(
+        "the web does not run whole under piece {piece} of the stake weld (it comes {by} nearer than at the start): welded as it is; draw the path along the web"
+    )]
+    WebNotAlong { piece: usize, by: f64 },
 }
 
 /// The end of [`StakeRefusal::NoWebUnder`]'s message: the fix.
@@ -145,9 +162,10 @@ pub struct Stake {
 ///
 /// # Errors
 /// [`StakeRefusal::Invalid`] for a thickness, depth or width that is not finite and positive, and
-/// a zone that meets no metal of the skin or the web; [`StakeRefusal::Fusion`] for what the fusion
-/// weld refuses (the path, an arc tighter than the weld, sizes the model cannot hold). The errors
-/// of the kernel calls otherwise.
+/// a zone that meets no metal of the skin; [`StakeRefusal::WebOutOfReach`] for a zone that meets no
+/// metal of the web, which stands as far under the sheet as the weld's depth or further;
+/// [`StakeRefusal::Fusion`] for what the fusion weld refuses (the path, an arc tighter than the
+/// weld, sizes the model cannot hold). The errors of the kernel calls otherwise.
 pub fn stake_weld(weld: &StakeWeld, skin: &Body, web: &Body) -> Result<Stake> {
     if !(positive(weld.skin) && positive(weld.depth) && positive(weld.width)) {
         return bad("a stake weld skin thickness, depth or width that is not finite and positive");
@@ -171,7 +189,10 @@ pub fn stake_weld(weld: &StakeWeld, skin: &Body, web: &Body) -> Result<Stake> {
         }
         for (part, side) in [(skin, SpotSide::Lower), (web, SpotSide::Upper)] {
             let Some(body) = solidcraft_kernel::boolean(&piece.body, part, BoolOp::Intersect)? else {
-                return bad("a stake weld zone that meets no metal of the top sheet or the web");
+                if side == SpotSide::Upper {
+                    return Err(StakeRefusal::WebOutOfReach { depth: weld.depth });
+                }
+                return bad("a stake weld zone that meets no metal of the top sheet");
             };
             pieces.push(SpotPiece { body, zone: SpotZone::Inside, side });
         }
@@ -179,8 +200,8 @@ pub fn stake_weld(weld: &StakeWeld, skin: &Body, web: &Body) -> Result<Stake> {
     Ok(Stake { pieces, notices: fusion.notices })
 }
 
-/// Where a stake weld sits: what [`StakeWeld`] needs but its depth, width and shape, and how far
-/// the line was moved.
+/// Where a stake weld sits: what [`StakeWeld`] needs but its depth, width and shape, how far the
+/// line was moved, and what is off in the fit-up.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StakeSite {
     /// Where the path starts, on the skin's underside over the web's middle.
@@ -194,6 +215,8 @@ pub struct StakeSite {
     /// How far the line was moved onto the web's middle, when it was moved by more than the weld
     /// tolerance: the notice for the user.
     pub moved: Option<f64>,
+    /// What is off in the fit-up, past its band: built on the real faces, the user told.
+    pub notices: Vec<StakeNotice>,
 }
 
 /// The site of a stake weld of `width` drawn from `start` along `path` on record face `face` of
@@ -211,7 +234,10 @@ pub struct StakeSite {
 /// parts' faces and edges, not at sample points: the room to the picked face's edges, holes
 /// included; the top sheet whole and even around the path at its mid-thickness (half its
 /// thickness from every face); the web whole around the path lowered into it (as far from every
-/// face as from its top); and, at the start, the web touching the top sheet, to the tolerance.
+/// face as from its top, under a gap); and, at the start, the web touching the top sheet. What is
+/// off is a [`StakeNotice`]: a gap past the band of [`crate::weld_tolerance`] for the sheet's
+/// thickness, the rest past the weld `tolerance`. A gap the weld cannot reach across is refused
+/// by [`stake_weld`], which knows the depth.
 ///
 /// # Errors
 /// [`StakeRefusal::Invalid`] for a face the skin does not have or that is not flat, a start that
@@ -289,19 +315,29 @@ pub fn stake_site(skin: &Body, face: usize, web: &Body, start: [f64; 3], path: &
     // room to the face's edges checked below along the whole path, the path stays on it
     through(skin, face, add(new_start, scale(normal, -t)), normal, tol)?;
 
-    // the web touching the top sheet at the start, to the tolerance
+    // the web touching the top sheet at the start: a gap past its band, an overlap past the
+    // tolerance, told. Shortcut: ISO's band at level C; the weld's own standard, level and the
+    // user's value (WeldSettings::tolerance) come with the stake command (#15131).
+    let mut notices = Vec::new();
+    let mut apart = 0.0;
     match web.classify_point(Vec3::from(new_start))? {
         PointClass::OnBoundary => {}
-        PointClass::Outside => match web.face_hits_by_ray(new_start, normal)?.first() {
-            None => return Err(StakeRefusal::NoWebUnder { nearest: None }),
-            Some(h) if h.distance > tolerance => return Err(StakeRefusal::WebApart { gap: h.distance }),
-            Some(_) => {}
-        },
+        PointClass::Outside => {
+            let Some(h) = web.face_hits_by_ray(new_start, normal)?.first().copied() else {
+                return Err(StakeRefusal::NoWebUnder { nearest: None });
+            };
+            apart = h.distance;
+            let sizes = Sizes { t, ..Sizes::default() };
+            let band = tolerance_band(Family::Iso, Joint::Stake, Deviation::Gap, sizes, Level::C).map_or(tolerance, |b| b.silent.max(tolerance));
+            if apart > band {
+                notices.push(StakeNotice::WebApart { gap: apart, band });
+            }
+        }
         PointClass::Inside => {
             if let Some(h) = web.face_hits_by_ray(new_start, scale(normal, -1.0))?.first()
                 && h.distance > tolerance
             {
-                return Err(StakeRefusal::WebOverlap { by: h.distance });
+                notices.push(StakeNotice::WebOverlap { by: h.distance });
             }
         }
     }
@@ -324,7 +360,7 @@ pub fn stake_site(skin: &Body, face: usize, web: &Body, start: [f64; 3], path: &
     }
 
     // the top sheet whole and even around the path at mid-thickness; the web whole around it
-    // lowered into the web
+    // lowered into the web, under a gap
     let skin_faces: Vec<usize> = (0..skin.face_count()).collect();
     let lift = scale(normal, -t / 2.0);
     if skin.classify_point(Vec3::from(add(new_start, lift)))? != PointClass::Inside {
@@ -335,16 +371,16 @@ pub fn stake_site(skin: &Body, face: usize, web: &Body, start: [f64; 3], path: &
         let (helper, edge) = piece.helper(lift, normal, width, tol)?;
         let c = skin.closest_to_edge_of(&skin_faces, &[], &helper, edge)?.ok_or(StakeRefusal::NotMeasured { piece: i })?;
         if t / 2.0 - c.distance > tolerance {
-            return Err(StakeRefusal::SkinUneven { piece: i, by: t / 2.0 - c.distance });
+            notices.push(StakeNotice::SkinUneven { piece: i, by: t / 2.0 - c.distance });
         }
-        let (helper, edge) = piece.helper(scale(normal, h), normal, width, tol)?;
+        let (helper, edge) = piece.helper(scale(normal, apart + h), normal, width, tol)?;
         let c = web.closest_to_edge_of(&web_faces, &[], &helper, edge)?.ok_or(StakeRefusal::NotMeasured { piece: i })?;
         if h - c.distance > tolerance {
-            return Err(StakeRefusal::WebNotAlong { piece: i, by: h - c.distance });
+            notices.push(StakeNotice::WebNotAlong { piece: i, by: h - c.distance });
         }
     }
     let moved = (by.abs() > tolerance).then_some(by.abs());
-    Ok(StakeSite { start: new_start, path: new_path, normal, skin: t, moved })
+    Ok(StakeSite { start: new_start, path: new_path, normal, skin: t, moved, notices })
 }
 
 /// The joints of `laid` moved `by` sideways (left about `normal`), on the face: with the pieces

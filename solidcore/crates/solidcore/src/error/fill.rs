@@ -70,9 +70,9 @@ pub enum FillFailure {
         /// The height asked for.
         height: f64,
     },
-    /// Blended toes where the sides beyond the toes do not run along the chord between them
-    /// (no depth normal given, or one not square to the chord): the run-out would not be
-    /// tangent to them.
+    /// Blended toes the sides beyond the toes cannot take: no depth normal given (the sides have
+    /// no direction to run out along), or sides at two levels so far apart for the overlap and
+    /// the height that a blend has no circle tangent to its side and to the crest's arc.
     BlendedToesOffChord {
         /// Which face.
         side: FillSide,

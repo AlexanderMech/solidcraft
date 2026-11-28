@@ -107,15 +107,19 @@ pub struct Band {
     pub outside: Option<f64>,
     /// Past this no sensible weld is left: refused, naming the fix.
     pub refused_past: Option<f64>,
+    /// Where the band's values come from; kept when the user sets `silent`, so the "outside"
+    /// notice still names it.
     pub source: &'static str,
     pub proposed: bool,
+    /// `silent` is the user's own value, not `source`'s.
+    pub user: bool,
 }
 
 impl Band {
     /// The band with the user's own silent value, when given.
     pub fn with_override(self, silent: Option<f64>) -> Self {
         match silent {
-            Some(silent) => Self { silent, source: "set by the user", proposed: false, ..self },
+            Some(silent) => Self { silent, user: true, ..self },
             None => self,
         }
     }
@@ -133,7 +137,7 @@ const ISO_13920: &str = "ISO 13920:2023 Table 2, class B";
 const ISO_13919: &str = "ISO 13919-1:2019 Table 1 row 3.2 (508)";
 
 fn band(silent: f64, outside: Option<f64>, source: &'static str, proposed: bool) -> Band {
-    Band { silent, outside, refused_past: None, source, proposed }
+    Band { silent, outside, refused_past: None, source, proposed, user: false }
 }
 
 fn accuracy() -> Band {
@@ -201,9 +205,11 @@ pub fn tolerance(family: Family, joint: Joint, deviation: Deviation, sizes: Size
     let Sizes { t, reach, l, tube, .. } = sizes;
     Some(match (joint, deviation) {
         (J::Fillet, D::Gap) => {
-            let a = sizes.a.or(reach.map(|z| z / std::f64::consts::SQRT_2))?;
             let b = match family {
-                Family::Iso => band(fillet_gap_iso(level, t, a), Some(fillet_gap_iso(Level::D, t, a)), ISO_5817_GAP, false),
+                Family::Iso => {
+                    let a = sizes.a.or(reach.map(|z| z / std::f64::consts::SQRT_2))?;
+                    band(fillet_gap_iso(level, t, a), Some(fillet_gap_iso(Level::D, t, a)), ISO_5817_GAP, false)
+                }
                 // shortcut: AWS's 8 mm for parts 75 mm or thicker on backing is not read, add it when backing is modelled
                 Family::Aws => band(2.0, Some(5.0), AWS_GAP, false),
             };
@@ -213,8 +219,15 @@ pub fn tolerance(family: Family, joint: Joint, deviation: Deviation, sizes: Size
         // shortcut: "outside" on the throat a shortened leg loses (ISO 5817 5213, AWS Table 8.1) comes with the leg shortening
         (J::Fillet | J::Butt | J::Edge, D::Toe) => accuracy(),
         (J::Butt, D::Gap) => {
+            // the opening is part of the groove and filled as modelled: no notice up to the most
+            // that AWS lets be corrected by welding before joining, outside past it
             let past = (2.0 * t).min(20.0);
-            band(past, Some(past), "AWS D1.1 5.22.4.3 (2000), also for ISO documents", false)
+            band(
+                past,
+                Some(past),
+                "proposed: filled as modelled; outside past AWS D1.1 5.22.4.3's correction limit (2000), also for ISO documents",
+                true,
+            )
         }
         (J::Butt | J::Edge | J::Plug, D::Tilt) => angle(l),
         (J::Butt, D::Drift) => band(25.4 / 16.0, None, "AWS D1.1 Figure 5.3, root opening as fit-up, also for ISO documents", false),

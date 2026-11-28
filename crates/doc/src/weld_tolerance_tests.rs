@@ -40,8 +40,11 @@ fn a_fillet_s_gap_follows_iso_5817_row_3_2_by_level_and_aws_d1_1() {
     // AWS: 2 mm, outside past 5, whatever the size
     let b = fillet(Family::Aws, Level::C, 10.0, 4.0);
     assert_eq!((b.silent, b.outside, b.refused_past), (2.0, Some(5.0), Some(4.0)));
-    // no size to read: nothing to say
-    assert_eq!(tolerance(Family::Iso, Joint::Fillet, Deviation::Gap, Sizes { t: 5.0, ..Sizes::default() }, Level::C), None);
+    // no size to read: nothing to say under ISO; AWS's 2 and 5 mm need none, and no refusal point
+    let none = Sizes { t: 5.0, ..Sizes::default() };
+    assert_eq!(tolerance(Family::Iso, Joint::Fillet, Deviation::Gap, none, Level::C), None);
+    let b = tolerance(Family::Aws, Joint::Fillet, Deviation::Gap, none, Level::C).unwrap();
+    assert_eq!((b.silent, b.outside, b.refused_past), (2.0, Some(5.0), None));
 }
 
 #[test]
@@ -92,6 +95,7 @@ fn the_other_rows_read_their_sizes_and_name_their_refusal_point() {
     // butt: filled as modelled, outside past twice the thinner part or 20 mm
     assert!(close(gap(Joint::Butt, s(6.0, None)).outside.unwrap(), 12.0));
     assert!(close(gap(Joint::Butt, s(15.0, None)).outside.unwrap(), 20.0));
+    assert!(gap(Joint::Butt, s(6.0, None)).proposed, "AWS's correction limit is not a fit-up allowance");
     // a groove's drift: AWS Figure 5.3's 1/16 in
     let d = tolerance(Family::Aws, Joint::Butt, Deviation::Drift, s(6.0, None), Level::C).unwrap();
     assert!(close(d.silent, 1.5875));
@@ -131,7 +135,8 @@ fn the_user_s_value_replaces_the_silent_band_only() {
     assert_eq!(b.with_override(None), b);
     let mine = b.with_override(Some(0.4));
     assert_eq!((mine.silent, mine.outside, mine.refused_past), (0.4, b.outside, b.refused_past));
-    assert_eq!(mine.source, "set by the user");
+    assert!(mine.user && !b.user);
+    assert_eq!((mine.source, mine.proposed), (b.source, b.proposed), "the outside notice still names the standard");
 }
 
 #[test]

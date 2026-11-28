@@ -253,24 +253,32 @@ pub(crate) fn surface_of(b: &Brep, face: usize) -> Option<FaceSurface> {
 /// The kernel's failure to box the body, to cross an edge with the plane or to place a point on
 /// the face.
 pub fn axial_face_section(b: &Body, face: usize, plane: &solidcore_record::Plane) -> Result<Option<Vec<AxialPiece>>> {
-    let arr = |v: Vec3| [v.x, v.y, v.z];
+    // a plane face is left to the caller's own section (the sketch's), as before planes were read
+    if b.is_mesh() || matches!(surface_of(b.record(), face), Some(FaceSurface::Plane { .. })) {
+        return Ok(None);
+    }
+    revolved_face_section(b, face, plane)
+}
+
+/// [`axial_face_section`], and a plane face too: the line where `plane` meets it, when its normal
+/// lies in `plane` (it leans across `plane` by no more than the model tolerance over the body's
+/// box), cut and kept as the other faces' meridians are. For a face that is square to an axis
+/// `plane` holds (a pipe's land, a square end), its section through that axis.
+///
+/// # Errors
+///
+/// As [`axial_face_section`].
+pub fn revolved_face_section(b: &Body, face: usize, plane: &solidcore_record::Plane) -> Result<Option<Vec<AxialPiece>>> {
     if b.is_mesh() {
         return Ok(None);
     }
     let record = b.record();
-    let on = match surface_of(record, face) {
-        Some(FaceSurface::Cylinder { origin, axis, radius }) => Revolved::Cylinder { origin: arr(origin), axis: arr(axis.vec()), radius },
-        Some(FaceSurface::Cone { apex, axis, half_angle }) => Revolved::Cone { apex: arr(apex), axis: arr(axis.vec()), half_angle },
-        Some(FaceSurface::Sphere { center, radius }) => Revolved::Sphere { centre: arr(center), radius },
-        Some(FaceSurface::Torus { center, axis, major, minor }) => Revolved::Torus { centre: arr(center), axis: arr(axis.vec()), major, minor },
-        Some(FaceSurface::Plane { .. }) | None => return Ok(None),
+    let Some(on) = revolved(surface_of(record, face)) else {
+        return Ok(None);
     };
     let tol = record.tolerance;
     let (origin, normal) = (arr(plane.origin), arr(plane.normal()));
-    let bounds = b.exact_bounds()?;
-    let (lo, hi) = (bounds.min, bounds.max);
-    let corners: Vec<[f64; 3]> =
-        [lo.x, hi.x].into_iter().flat_map(|x| [lo.y, hi.y].into_iter().flat_map(move |y| [lo.z, hi.z].into_iter().map(move |z| [x, y, z]))).collect();
+    let corners = box_corners(b)?;
     if !solidcore_ops::axial_section::holds_axis(&on, origin, normal, &corners, tol) {
         return Ok(None);
     }
@@ -286,6 +294,56 @@ pub fn axial_face_section(b: &Body, face: usize, plane: &solidcore_record::Plane
     }
     let on_face = |[x, y, z]: [f64; 3]| b.point_lies_on_face(face, Vec3::new(x, y, z), tol).map(|found| found.is_some());
     solidcore_ops::axial_section::axial_section(&on, origin, normal, &corners, tol, &cuts, on_face)
+}
+
+pub use solidcore_ops::axial_section::CommonAxis;
+
+/// The axis faces `faces` (each a body and a record face index of it; several bodies may take
+/// part) are all revolved about, within the zone tolerance over each body's exact box
+/// ([`solidcore_ops::axial_section::common_axis`]): a cylinder's, cone's or torus's axis that
+/// every face's axis lies within the tolerance of, every sphere's centre and every plane's normal
+/// along it. [`CommonAxis::Unproved`] names a face that is no plane or analytic surface of
+/// revolution (a spline that only follows one).
+///
+/// # Errors
+///
+/// [`KernelError::Invalid`] for an index past a body's faces; [`KernelError::Failed`] for a mesh
+/// body, the zone tolerance and the kernel's failure to box a body.
+pub fn common_axis(faces: &[(&Body, usize)]) -> Result<CommonAxis> {
+    let tol = solidcore_ops::sweep::zone_tolerance().map_err(|e| KernelError::Failed(format!("common axis: zone tolerance: {e}")))?;
+    let mut surfaces = Vec::with_capacity(faces.len());
+    for &(b, face) in faces {
+        if b.is_mesh() {
+            return Err(KernelError::Failed("common axis: a mesh body".into()));
+        }
+        if face >= b.record().faces.len() {
+            return Err(KernelError::Invalid(format!("common axis: the body has no face {face}")));
+        }
+        surfaces.push((revolved(surface_of(b.record(), face)), box_corners(b)?));
+    }
+    Ok(solidcore_ops::axial_section::common_axis(&surfaces, tol))
+}
+
+/// A face's analytic surface as ops' surface of revolution (a plane included).
+fn revolved(surface: Option<FaceSurface>) -> Option<Revolved> {
+    Some(match surface? {
+        FaceSurface::Cylinder { origin, axis, radius } => Revolved::Cylinder { origin: arr(origin), axis: arr(axis.vec()), radius },
+        FaceSurface::Cone { apex, axis, half_angle } => Revolved::Cone { apex: arr(apex), axis: arr(axis.vec()), half_angle },
+        FaceSurface::Sphere { center, radius } => Revolved::Sphere { centre: arr(center), radius },
+        FaceSurface::Torus { center, axis, major, minor } => Revolved::Torus { centre: arr(center), axis: arr(axis.vec()), major, minor },
+        FaceSurface::Plane { normal, point } => Revolved::Plane { point: arr(point), normal: arr(normal.vec()) },
+    })
+}
+
+/// The eight corners of `b`'s exact box.
+fn box_corners(b: &Body) -> Result<Vec<[f64; 3]>> {
+    let bounds = b.exact_bounds()?;
+    let (lo, hi) = (bounds.min, bounds.max);
+    Ok([lo.x, hi.x].into_iter().flat_map(|x| [lo.y, hi.y].into_iter().flat_map(move |y| [lo.z, hi.z].into_iter().map(move |z| [x, y, z]))).collect())
+}
+
+fn arr(v: Vec3) -> [f64; 3] {
+    [v.x, v.y, v.z]
 }
 
 /// The circle (or arc of one) an edge's curve lies on, from its exact curve.
@@ -529,5 +587,90 @@ mod tests {
         };
         assert!(same_record_surface(&rat_a, &rat_rounded, 1e-6));
         assert!(!same_record_surface(&rat_a, &rat_diff_weight, 1e-6));
+    }
+
+    /// A tube turned a whole turn about the line through `(0, axis_y)` along x, from its section
+    /// (x along the axis, y radial) in the XY plane.
+    fn tube(corners: &[(f64, f64)], axis_y: f64) -> Body {
+        use solidcore_record::{Loop2, Plane, Region2, Vec2};
+        let pts: Vec<Vec2> = corners.iter().map(|&(x, y)| Vec2::new(x, y + axis_y)).collect();
+        let region = Region2 { outer: Loop2::polygon(&pts), holes: Vec::new() };
+        let mut made = crate::revolve(&Plane::XY, &[region], Vec2::new(0.0, axis_y), Vec2::new(1.0, 0.0), std::f64::consts::TAU).unwrap();
+        assert_eq!(made.len(), 1);
+        made.remove(0)
+    }
+
+    /// Two tubes end to end (bore 40, wall 8): a 60° V, a land 2 and a gap 2, the right tube's
+    /// axis `lift` above the left one's.
+    fn v_tubes(lift: f64) -> (Body, Body) {
+        let o = 6.0 * 30.0_f64.to_radians().tan();
+        let left = tube(&[(-30.0, 40.0), (-1.0, 40.0), (-1.0, 42.0), (-1.0 - o, 48.0), (-30.0, 48.0)], 0.0);
+        let right = tube(&[(1.0, 40.0), (30.0, 40.0), (30.0, 48.0), (1.0 + o, 48.0), (1.0, 42.0)], lift);
+        (left, right)
+    }
+
+    fn every_face<'a>(bodies: &[&'a Body]) -> Vec<(&'a Body, usize)> {
+        bodies.iter().flat_map(|b| (0..b.record().faces.len()).map(move |f| (*b, f))).collect()
+    }
+
+    /// Two tubes' cylinders, bevel cones, lands and end planes share the tube's axis; a right
+    /// tube 0.01 off it is named; planes alone give none (T49, #18500).
+    #[test]
+    fn faces_of_two_tubes_share_their_axis() {
+        let (left, right) = v_tubes(0.0);
+        let faces = every_face(&[&left, &right]);
+        match common_axis(&faces).unwrap() {
+            CommonAxis::About { origin, axis, .. } => {
+                assert!(origin[1].abs() < 1e-9 && origin[2].abs() < 1e-9, "{origin:?}");
+                assert!((axis[0].abs() - 1.0).abs() < 1e-12, "{axis:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let (left, right) = v_tubes(0.01);
+        let left_faces = left.record().faces.len();
+        match common_axis(&every_face(&[&left, &right])).unwrap() {
+            CommonAxis::NotAbout { face } => assert!(face >= left_faces, "a right tube's face: {face}"),
+            other => panic!("{other:?}"),
+        }
+        let planes: Vec<(&Body, usize)> =
+            every_face(&[&left]).into_iter().filter(|&(b, f)| matches!(face_surface(b, f), Some(FaceSurface::Plane { .. }))).collect();
+        assert_eq!(planes.len(), 2, "the land and the far end");
+        assert_eq!(common_axis(&planes).unwrap(), CommonAxis::Undetermined);
+        assert!(common_axis(&[(&left, 99)]).is_err());
+    }
+
+    /// A tube's land (a plane square to its axis) cut by a plane through the axis: its two lines,
+    /// from the bore to the bevel; `axial_face_section` still leaves planes to its caller.
+    #[test]
+    fn a_plane_face_square_to_the_axis_gives_its_lines() {
+        let (left, _) = v_tubes(0.0);
+        let land = (0..left.record().faces.len())
+            .find(|&f| matches!(face_surface(&left, f), Some(FaceSurface::Plane { point, .. }) if (point.x + 1.0).abs() < 1e-9))
+            .unwrap();
+        let plane = solidcore_record::Plane::XY;
+        assert!(axial_face_section(&left, land, &plane).unwrap().is_none());
+        let mut ys: Vec<[f64; 2]> = match revolved_face_section(&left, land, &plane).unwrap() {
+            Some(pieces) => pieces
+                .into_iter()
+                .map(|p| match p {
+                    AxialPiece::Line { start, end } => {
+                        assert!((start[0] + 1.0).abs() < 1e-9 && (end[0] + 1.0).abs() < 1e-9, "{start:?} {end:?}");
+                        let (a, b) = (start[1].min(end[1]), start[1].max(end[1]));
+                        [a, b]
+                    }
+                    other => panic!("{other:?}"),
+                })
+                .collect(),
+            None => panic!("no section"),
+        };
+        ys.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        let want = [[-42.0, -40.0], [40.0, 42.0]];
+        assert_eq!(ys.len(), 2, "{ys:?}");
+        for (got, want) in ys.iter().zip(want) {
+            assert!((got[0] - want[0]).abs() < 1e-9 && (got[1] - want[1]).abs() < 1e-9, "{got:?} {want:?}");
+        }
+        // a plane through the land's own plane gives none
+        let along = solidcore_record::Plane { origin: Vec3::new(-1.0, 0.0, 0.0), x: Vec3::new(0.0, 1.0, 0.0), y: Vec3::new(0.0, 0.0, 1.0) };
+        assert!(revolved_face_section(&left, land, &along).unwrap().is_none());
     }
 }

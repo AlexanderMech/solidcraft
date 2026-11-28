@@ -2,7 +2,9 @@
 //! form: the kernel's [`solidcore::geom::axial_section::axial_section`] on records' numbers
 //! (#17496, #17498, #17499, #17500). Ops converts.
 
-use solidcore::geom::axial_section::{self as k, AxialPiece as KPiece, Revolved as KRevolved};
+use solidcore::geom::axial_section::{
+    self as k, AxialPiece as KPiece, CommonAxis as KCommonAxis, Revolved as KRevolved,
+};
 use solidcore::geom::vector3d::Vec3;
 
 /// A surface of revolution ([`k::Revolved`]).
@@ -32,6 +34,13 @@ pub enum Revolved {
         centre: [f64; 3],
         /// The radius.
         radius: f64,
+    },
+    /// A plane: revolved about any axis along its normal.
+    Plane {
+        /// A point on the plane.
+        point: [f64; 3],
+        /// Its normal (any length).
+        normal: [f64; 3],
     },
     /// A torus: its centre, axis, ring (major) and tube (minor) radii.
     Torus {
@@ -101,6 +110,10 @@ fn surface(s: &Revolved) -> KRevolved {
         Revolved::Sphere { centre, radius } => KRevolved::Sphere {
             centre: vec(centre),
             radius,
+        },
+        Revolved::Plane { point, normal } => KRevolved::Plane {
+            point: vec(point),
+            normal: vec(normal),
         },
         Revolved::Torus {
             centre,
@@ -234,4 +247,56 @@ pub fn axial_section<E>(
         |p| on_face(p.to_array()),
     )?;
     Ok(made.map(|pieces| pieces.into_iter().map(piece).collect()))
+}
+
+/// The axis a set of faces share ([`k::CommonAxis`] in records' numbers), as [`common_axis`]
+/// finds it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CommonAxis {
+    /// Every face is revolved about the line through `origin` along the unit `axis`; `by` is the
+    /// face whose axis it is (an index into the faces passed).
+    About {
+        /// A point on the axis.
+        origin: [f64; 3],
+        /// The unit axis.
+        axis: [f64; 3],
+        /// The face that gave it.
+        by: usize,
+    },
+    /// No face gives an axis: only planes and spheres.
+    Undetermined,
+    /// Face `face` is not revolved about the first axis tried, and no other face's axis holds
+    /// every face.
+    NotAbout {
+        /// The face, as an index into the faces passed.
+        face: usize,
+    },
+    /// Face `face` is no surface of revolution or plane (`None` passed for it).
+    Unproved {
+        /// The face, as an index into the faces passed.
+        face: usize,
+    },
+}
+
+/// The axis every face is revolved about within `tol` (the kernel's [`k::common_axis`]), each
+/// face given by its surface (`None` for one that is no surface of revolution or plane) and the
+/// corners of a box around it.
+#[must_use]
+pub fn common_axis(faces: &[(Option<Revolved>, Vec<[f64; 3]>)], tol: f64) -> CommonAxis {
+    let mut surfaces = Vec::with_capacity(faces.len());
+    for (face, (on, extent)) in faces.iter().enumerate() {
+        let Some(on) = on else {
+            return CommonAxis::Unproved { face };
+        };
+        surfaces.push((surface(on), extent.iter().map(|p| vec(*p)).collect()));
+    }
+    match k::common_axis(&surfaces, tol) {
+        KCommonAxis::About { origin, axis, by } => CommonAxis::About {
+            origin: origin.to_array(),
+            axis: axis.to_array(),
+            by,
+        },
+        KCommonAxis::Undetermined => CommonAxis::Undetermined,
+        KCommonAxis::NotAbout { surface } => CommonAxis::NotAbout { face: surface },
+    }
 }

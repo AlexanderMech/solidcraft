@@ -2,7 +2,9 @@
 //! its axis, in closed form (not upstream, #17496, #17498, #17499, #17500): the plane meets the
 //! surface in its meridians, the profile turned into the plane, which are lines for a cylinder
 //! or a cone and circles for a sphere or a torus. A face of the surface keeps the pieces of them
-//! between the points where its boundary crosses the plane that lie on the face.
+//! between the points where its boundary crosses the plane that lie on the face. A plane is
+//! revolved about any axis along its normal: a plane through such an axis meets it in one line.
+//! [`common_axis`] finds the axis a set of them share.
 
 use crate::geom::vector3d::{Point3, Vec3};
 use crate::math::det;
@@ -35,6 +37,14 @@ pub enum Revolved {
         centre: Point3,
         /// The radius.
         radius: f64,
+    },
+    /// A plane: revolved about any axis along its normal, so a plane through such an axis meets
+    /// it in one line.
+    Plane {
+        /// A point on the plane.
+        point: Point3,
+        /// Its normal (any length).
+        normal: Vec3,
     },
     /// A torus: its centre, axis, ring (major) and tube (minor) radii.
     Torus {
@@ -215,6 +225,27 @@ fn meridians(
                 e2: n.cross(e1),
             }]
         }
+        Revolved::Plane { point, normal } => {
+            let m = normal.unitize().ok()?;
+            // The plane's normal lies in the cutting plane: the plane leans across it by no more
+            // than `tol` over the extent's reach from `plane_point`.
+            let reach = extent
+                .iter()
+                .map(|p| (*p - plane_point).length())
+                .fold(0.0, f64::max);
+            if m.dot(n).abs() * reach > tol {
+                return None;
+            }
+            let dir = n.cross(m).unitize().ok()?;
+            // `point` taken into the cutting plane, then along it to the plane.
+            let q = into_plane(point);
+            let e = (m - n * m.dot(n)).unitize().ok()?;
+            vec![Meridian::Line {
+                base: q + e * ((point - q).dot(m) / e.dot(m)),
+                dir,
+                from_base: false,
+            }]
+        }
         Revolved::Torus {
             centre,
             axis,
@@ -384,6 +415,61 @@ pub fn holds_axis(
             .is_ok_and(|n| meridians(surface, plane_point, n, extent, tol).is_some())
 }
 
+/// The axis a set of surfaces share, as [`common_axis`] finds it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CommonAxis {
+    /// Every surface is revolved about the line through `origin` along the unit `axis`; `by` is
+    /// the surface whose axis it is (an index into the surfaces passed).
+    About {
+        /// A point on the axis.
+        origin: Point3,
+        /// The unit axis.
+        axis: Vec3,
+        /// The surface that gave it.
+        by: usize,
+    },
+    /// No surface gives an axis: only planes and spheres.
+    Undetermined,
+    /// Surface `surface` (an index into the surfaces passed) is not revolved about the first
+    /// axis tried, and no other surface's axis holds every surface.
+    NotAbout {
+        /// The surface.
+        surface: usize,
+    },
+}
+
+/// The axis every surface of `surfaces` (each with the corners of a box around its face) is
+/// revolved about within `tol`: each cylinder's, cone's and torus's axis is tried in turn, and
+/// the first that two planes through it, square to each other, both hold for every surface
+/// within `tol / √2` ([`holds_axis`]: each surface's axis, a sphere's centre, a plane's normal)
+/// is the answer, so every surface's axis lies within `tol` of it over its box.
+#[must_use]
+pub fn common_axis(surfaces: &[(Revolved, Vec<Point3>)], tol: f64) -> CommonAxis {
+    let t = tol / core::f64::consts::SQRT_2;
+    let mut first = None;
+    for (by, (surface, _)) in surfaces.iter().enumerate() {
+        let (origin, axis) = match *surface {
+            Revolved::Cylinder { origin, axis, .. } => (origin, axis),
+            Revolved::Cone { apex, axis, .. } => (apex, axis),
+            Revolved::Torus { centre, axis, .. } => (centre, axis),
+            Revolved::Sphere { .. } | Revolved::Plane { .. } => continue,
+        };
+        let Ok([axis, n1, n2]) = axis.make_unit_ortho_vectors(None) else {
+            continue;
+        };
+        let off = surfaces.iter().position(|(s, extent)| {
+            !(holds_axis(s, origin, n1, extent, t) && holds_axis(s, origin, n2, extent, t))
+        });
+        match off {
+            None => return CommonAxis::About { origin, axis, by },
+            Some(surface) => {
+                first.get_or_insert(CommonAxis::NotAbout { surface });
+            }
+        }
+    }
+    first.unwrap_or(CommonAxis::Undetermined)
+}
+
 /// Whether every number is finite and `tol` positive.
 fn usable(surface: &Revolved, plane_point: Point3, points: &[Point3], tol: f64) -> bool {
     let finite = |v: Vec3| v.x.is_finite() && v.y.is_finite() && v.z.is_finite();
@@ -399,6 +485,7 @@ fn usable(surface: &Revolved, plane_point: Point3, points: &[Point3], tol: f64) 
             half_angle: r,
         } => finite(p) && finite(axis) && r.is_finite(),
         Revolved::Sphere { centre, radius } => finite(centre) && radius.is_finite(),
+        Revolved::Plane { point, normal } => finite(point) && finite(normal),
         Revolved::Torus {
             centre,
             axis,

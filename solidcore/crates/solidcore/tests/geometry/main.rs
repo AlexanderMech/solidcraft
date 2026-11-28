@@ -19,6 +19,8 @@ mod adv_surface_intersector_get_tree;
 mod arena_uv_trim_owner;
 #[path = "../assert_valid_level0_helpers.rs"]
 mod assert_valid_level0_helpers;
+#[path = "../axial_common_axis.rs"]
+mod axial_common_axis;
 #[path = "../brep_query_cache_lifetime.rs"]
 mod brep_query_cache_lifetime;
 #[path = "../check_memo_incremental.rs"]

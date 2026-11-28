@@ -41,6 +41,13 @@
 //! the toe is read only where that face meets the groove. Faces that lie on one surface are read
 //! as separate faces.
 //!
+//! A groove face drawn a little off straight (a draft, a sloppy model) is read as drifting across
+//! the joint ([`face_read`]): within [`DRIFT`] the weld keeps one section, read in the middle of
+//! the stretch, with no notice; further, it is lofted between its ends with a notice (T203, Q135,
+//! Q215). Butt plates not level are filled from toe to toe, a notice saying where the offset is
+//! past ISO 5817's level B ([`misalignment`]); square ends touching with a step between them are
+//! no groove, their mark following the step (T202, Q214).
+//!
 //! A groove face whose end is not square to the joint (a plate end cut at an angle) is read where
 //! its whole section is present ([`groove_weld`]): past that the section shrinks, so the joint is
 //! refused with the stretch where every groove face is whole, which builds on its own, as for
@@ -53,7 +60,7 @@ use solidcraft_kernel::affine;
 use solidcraft_kernel::api::UnitNormal;
 use solidcraft_kernel::{
     Body, BoolOp, ChannelFill, FillFailure, FillNote, FillOptions, FillSide, KernelError, PlanarPiece, Straight, boolean, extrude_planar_regions,
-    fill_channel, fill_margin, profiles, straight_direction,
+    fill_channel, fill_margin, loft_regions, profiles, straight_direction,
 };
 
 /// Which of the two parts of a joint something is about.
@@ -370,14 +377,53 @@ fn straight(pick: &GroovePick<'_>, f: usize, d: [f64; 3], zone: f64) -> Result<b
 /// The direction every one of `faces` is proved straight along, of either sign: one kernel call over
 /// both parts' faces ([`straight_direction`]), its refusals named by part and face.
 ///
+/// A groove face drawn a little off straight (a draft, a sloppy model; T203) fails that call: then
+/// one, else two, plane groove faces are set aside, the right part's first (the frame is the left
+/// part's), and the call is made over the rest; the first set that gives a direction wins, and
+/// [`face_read`] reads the faces set aside as drifting. An outer face is never set aside.
+/// shortcut: where each part's faces run straight along a direction of their own, either part may
+/// be the drifting one and the right one is taken, so swapping the parts changes which; a
+/// tie-break on the plates' other faces (their ends) if that matters.
+///
 /// # Errors
 /// [`GrooveRefusal::DirectionUndetermined`], [`GrooveRefusal::DirectionUndecided`],
-/// [`GrooveRefusal::GrooveFaceNotStraight`], [`GrooveRefusal::GrooveFaceNotProved`]; the errors of
-/// the kernel call.
+/// [`GrooveRefusal::GrooveFaceNotStraight`], [`GrooveRefusal::GrooveFaceNotProved`] (of the call
+/// over every face, where no set aside gives a direction); the errors of the kernel calls.
 fn direction(faces: &[(JointPart, &GroovePick<'_>, usize)]) -> Result<[f64; 3]> {
-    let reads: Vec<(&Body, usize)> = faces.iter().map(|&(_, pick, f)| (pick.part, f)).collect();
-    let at = |i: usize| faces.get(i).map(|&(part, _, f)| (part, f)).ok_or(GrooveRefusal::Invalid("a face index the kernel does not have"));
-    match straight_direction(&reads)? {
+    let all: Vec<usize> = (0..faces.len()).collect();
+    let first = search(faces, &all)?;
+    if !matches!(first, Straight::NotStraight { .. }) {
+        return found(faces, &all, first);
+    }
+    let mut spare: Vec<usize> = Vec::new();
+    for (i, &(_, pick, f)) in faces.iter().enumerate().rev() {
+        if f != pick.outer && pick.part.face_plane_normal(f)?.is_some() {
+            spare.push(i);
+        }
+    }
+    let singles: Vec<Vec<usize>> = spare.iter().map(|&i| vec![i]).collect();
+    let pairs: Vec<Vec<usize>> = spare.iter().enumerate().flat_map(|(k, &i)| spare[k + 1..].iter().map(move |&j| vec![i, j])).collect();
+    for aside in singles.iter().chain(&pairs) {
+        let kept: Vec<usize> = all.iter().copied().filter(|i| !aside.contains(i)).collect();
+        if let Straight::Along { direction, .. } = search(faces, &kept)? {
+            return Ok(direction);
+        }
+    }
+    found(faces, &all, first)
+}
+
+/// The kernel's search for a direction over the faces at the positions `kept` in `faces`.
+fn search(faces: &[(JointPart, &GroovePick<'_>, usize)], kept: &[usize]) -> Result<Straight> {
+    let reads: Vec<(&Body, usize)> = kept.iter().filter_map(|&i| faces.get(i)).map(|&(_, pick, f)| (pick.part, f)).collect();
+    Ok(straight_direction(&reads)?)
+}
+
+/// What the search over the faces at the positions `kept` in `faces` found, its faces named by part.
+fn found(faces: &[(JointPart, &GroovePick<'_>, usize)], kept: &[usize], straight: Straight) -> Result<[f64; 3]> {
+    let at = |i: usize| {
+        kept.get(i).and_then(|&k| faces.get(k)).map(|&(part, _, f)| (part, f)).ok_or(GrooveRefusal::Invalid("a face index the kernel does not have"))
+    };
+    match straight {
         Straight::Along { direction, .. } => Ok(direction),
         Straight::Undetermined => Err(GrooveRefusal::DirectionUndetermined),
         Straight::Undecided => Err(GrooveRefusal::DirectionUndecided),
@@ -450,6 +496,9 @@ pub struct GrooveWeld {
     pub fill: ChannelFill,
     /// The zone tolerance it was built to: a dip below a plate's surface no deeper is no dip.
     zone: f64,
+    /// Its notes that are not the fill's: plates offset past ISO 5817 level B (T202), a groove face
+    /// drifting past [`DRIFT`] (T203).
+    own: Vec<WeldNote>,
 }
 
 /// A stretch of the joint that keeps one section: from `from` to `to` mm along the joint from
@@ -583,7 +632,7 @@ pub fn groove_fillet_weld(picks: [&GroovePick<'_>; 2], options: &FillOptions, fi
     let piece = Piece { frame: &joint.frame, d: joint.d, along: [joint.start + over.from, joint.start + over.to], zone };
     let fill = fillet_fill(picks, parts, walls, &piece, options, fillet)?;
     let body = extrude_planar_regions(&joint.frame, std::slice::from_ref(&fill.region), piece.along[0], piece.along[1])?;
-    Ok(GrooveWeld { body, frame: joint.frame, fill, zone })
+    Ok(GrooveWeld { body, frame: joint.frame, fill, zone, own: Vec::new() })
 }
 
 /// The picks with a T joint's stem first, their parts as passed, and whether the second is a
@@ -614,6 +663,14 @@ struct Joint {
     end: f64,
     /// The stretches that keep one section, in order along the joint, each with its two walls.
     stretches: Vec<(Stretch, [Vec<Seg2>; 2])>,
+    /// Each part's groove faces read across the joint ([`face_read`]).
+    reads: [Vec<FaceRead>; 2],
+    /// The parts, as [`stem_first`] gives them.
+    parts: [JointPart; 2],
+    /// Whether the second part is a T joint's through part.
+    through: bool,
+    /// The groove face that drifts furthest across the joint (T203): its part, its face, how far.
+    drift: Option<(JointPart, usize, f64)>,
 }
 
 impl Joint {
@@ -710,7 +767,13 @@ fn cut(picks: [&GroovePick<'_>; 2], parts: [JointPart; 2], through: bool, zone: 
     if let (true, Some(why)) = (stretches.is_empty(), why) {
         return Err(why);
     }
-    Ok(Joint { frame, d, start, end, stretches })
+    let drift = reads
+        .iter()
+        .zip(parts)
+        .flat_map(|(r, part)| r.iter().map(move |r| (part, r.face, r.drift())))
+        .filter(|&(_, _, e)| e > 0.0)
+        .max_by(|a, b| a.2.total_cmp(&b.2));
+    Ok(Joint { frame, d, start, end, stretches, reads, parts, through, drift })
 }
 
 /// A piece of the joint: from `along[0]` to `along[1]` along `d`, measured from the frame's
@@ -828,13 +891,17 @@ fn part_wall(
         return Ok(None);
     };
     for &f in links.faces().iter().chain([&pick.outer]) {
-        if !straight(pick, f, piece.d, zone)? {
+        let drifting = reads.iter().any(|r| r.face == f && r.runs.is_some());
+        if !drifting && !straight(pick, f, piece.d, zone)? {
             return Ok(None);
         }
     }
-    // the toe in the frame: its edge's middle, along x and y
-    let toe = piece.in_frame(edge_middle(pick.part, toe)?);
-    Ok(wall_of(reads, &links, toe, zone).map(|wall| (wall, last)))
+    // the toe in the frame, in the piece's middle
+    let middle = (lo + hi) / 2.0;
+    let Some(toe) = edge_at(pick.part, toe, piece, middle)? else {
+        return Ok(None);
+    };
+    Ok(wall_of(reads, &links, toe, middle, zone).map(|wall| (wall, last)))
 }
 
 /// A T joint's through part's wall in `piece`, beside the stem's wall `stem`: along its outer
@@ -1055,7 +1122,7 @@ fn on_face(pick: &GroovePick<'_>, face: usize, p: [f64; 3], tol: f64) -> Result<
 
 /// The weld over `over`, a stretch (or part of one) whose walls are `walls`.
 fn build(picks: [&GroovePick<'_>; 2], joint: &Joint, over: Stretch, walls: &[Vec<Seg2>; 2], options: &FillOptions, zone: f64) -> Result<GrooveWeld> {
-    let frame = joint.frame;
+    let (frame, tol) = (joint.frame, zone * ALLOWANCE);
     // a butt joint measures the depth from the plates' outer faces, square to the frame's y (only
     // whether the right one is square is read: its level, and so the origin, does not matter)
     let right = picks[1];
@@ -1063,37 +1130,146 @@ fn build(picks: [&GroovePick<'_>; 2], joint: &Joint, over: Stretch, walls: &[Vec
     let depth_normal = butt.then_some(Vec2::new(0.0, 1.0));
     let [left_wall, right_wall] = walls;
     let along = [joint.start + over.from, joint.start + over.to];
+    let piece = Piece { frame: &frame, d: joint.d, along, zone };
     // shortcut: no groove only between butt plates; coincident walls elsewhere get the fill's
     // own refusal until a corner or T without a groove is asked for
-    if let Some(gap) = apart(left_wall, right_wall, zone * ALLOWANCE) {
-        if gap <= zone {
-            if let (true, Some(first), Some(last)) = (butt, left_wall.first(), left_wall.last()) {
-                let (toe, root) = (ends(first).0, ends(last).1);
-                let thickness = toe.y - root.y;
-                let arrow = Seam { at: toe, normal: Vec2::new(0.0, 1.0), thickness };
-                let under = Seam { at: root, normal: Vec2::new(0.0, -1.0), thickness };
-                // the other side's seam only where both parts' undersides are flat at the root's
-                // level beside it, out to the default mark's edges (brett19's point 1 on #22504),
-                // and its mark's space is clear of both parts all over (CodeRabbit on #22504)
-                let piece = Piece { frame: &frame, d: joint.d, along, zone };
-                let half = under.mark_width() / 2.0;
-                let flat = flat_under(picks[0], root, -half, &piece)? && flat_under(picks[1], root, half, &piece)?;
-                let clear = flat && clear_under(picks[0], &under, &piece)? && clear_under(picks[1], &under, &piece)?;
-                let other = clear.then_some(under);
-                return Err(GrooveRefusal::NoGroove(Box::new(NoGroove { frame, along, arrow, other })));
-            }
-        } else if gap <= zone + fill_margin(left_wall, right_wall)? {
-            // within the zone tolerance plus the fill's depth margin, as the kernel's fill keeps
-            // it ([`fill_margin`]; brett19's point 5 on #22504)
-            return Err(GrooveRefusal::Sliver { gap });
+    let gap = apart(left_wall, right_wall, tol);
+    // square ends that touch with a step between them: no groove either (T202)
+    let stepped = if butt { step(left_wall, right_wall, tol).filter(|s| s.abs() > zone) } else { None };
+    if (gap.is_some_and(|g| g <= zone) || stepped.is_some())
+        && let (true, Some(first), Some(last)) = (butt, left_wall.first(), left_wall.last())
+    {
+        let (toe, root) = (ends(first).0, ends(last).1);
+        // over a step a wall may end at the other plate's root ([`ended_at`]): each plate's
+        // thickness from its own faces, 1 mm in from the seam
+        let thickness = match stepped {
+            Some(_) => thickness_below(picks[0], Vec2::new(toe.x - 1.0, toe.y), &piece)?.unwrap_or(toe.y - root.y),
+            None => toe.y - root.y,
+        };
+        let arrow = Seam { at: toe, normal: Vec2::new(0.0, 1.0), thickness, step: stepped.unwrap_or(0.0) };
+        let under = Seam { at: root, normal: Vec2::new(0.0, -1.0), thickness, step: 0.0 };
+        // the other side's seam only where both parts' undersides are flat at the root's level
+        // beside it, out to the default mark's edges (brett19's point 1 on #22504), and its mark's
+        // space is clear of both parts all over (CodeRabbit on #22504); undersides with a step
+        // between them get none (shortcut: a mark following that step too if it is asked for)
+        let half = under.mark_width() / 2.0;
+        let flat = flat_under(picks[0], root, -half, &piece)? && flat_under(picks[1], root, half, &piece)?;
+        let clear = flat && clear_under(picks[0], &under, &piece)? && clear_under(picks[1], &under, &piece)?;
+        let other = clear.then_some(under);
+        let mut notes = Vec::new();
+        if let Some(s) = stepped {
+            let right_thickness = thickness_below(picks[1], Vec2::new(toe.x + 1.0, toe.y + s), &piece)?;
+            notes.extend(right_thickness.and_then(|t| misalignment(s.abs(), [thickness, t], tol)));
         }
+        return Err(GrooveRefusal::NoGroove(Box::new(NoGroove { frame, along, arrow, other, notes })));
     }
-    let fill = match fill_channel(left_wall, right_wall, depth_normal, options)? {
-        Ok(fill) => fill,
-        Err(refusal) => return Err(GrooveRefusal::Fill { why: refusal.why, fit: refusal.fit }),
+    if let Some(gap) = gap
+        && gap > zone
+        && gap <= zone + fill_margin(left_wall, right_wall)?
+    {
+        // within the zone tolerance plus the fill's depth margin, as the kernel's fill keeps
+        // it ([`fill_margin`]; brett19's point 5 on #22504)
+        return Err(GrooveRefusal::Sliver { gap });
+    }
+    let fill = fill_of(left_wall, right_wall, depth_normal, options)?;
+    let mut own: Vec<WeldNote> = Vec::new();
+    if butt && let (Some(lf), Some(ll), Some(rf), Some(rl)) = (left_wall.first(), left_wall.last(), right_wall.first(), right_wall.last()) {
+        let ([lt, lr], [rt, rr]) = ([ends(lf).0, ends(ll).1], [ends(rf).0, ends(rl).1]);
+        own.extend(misalignment((rt.y - lt.y).abs(), [lt.y - lr.y, rt.y - rr.y], tol));
+    }
+    let body = match joint.drift {
+        // a groove face drifting past [`DRIFT`]: the fills at the stretch's two ends lofted (Q215)
+        Some((part, face, drift)) if drift > DRIFT => {
+            // shortcut: a T joint's stem drifting that far is refused; its through wall at each end if asked for
+            if joint.through {
+                return Err(GrooveRefusal::GrooveFaceNotStraight { part, face });
+            }
+            let mut sections: Vec<(Plane, Region2)> = Vec::new();
+            for u in along {
+                let end = Piece { frame: &frame, d: joint.d, along: [u, u], zone };
+                let mut why = None;
+                let Some([l, r]) = piece_walls(picks, joint.parts, false, &joint.reads, &end, &mut why)? else {
+                    return Err(GrooveRefusal::GrooveFaceNotStraight { part, face });
+                };
+                let [x, y, z] = end.at(Vec2::new(0.0, 0.0), u);
+                sections.push((Plane { origin: Vec3::new(x, y, z), ..frame }, fill_of(&l, &r, depth_normal, options)?.region));
+            }
+            own.push(WeldNote {
+                text: format!(
+                    "face {face} of the {part:?} part drifts {drift:.2} mm across the joint, more than the {DRIFT} mm built with \
+                     one section: the weld follows it from end to end"
+                ),
+                warning: false,
+            });
+            loft_regions(&sections)?
+        }
+        _ => extrude_planar_regions(&frame, std::slice::from_ref(&fill.region), along[0], along[1])?,
     };
-    let body = extrude_planar_regions(&frame, std::slice::from_ref(&fill.region), along[0], along[1])?;
-    Ok(GrooveWeld { body, frame, fill, zone })
+    Ok(GrooveWeld { body, frame, fill, zone, own })
+}
+
+/// The channel between `left` and `right` filled as `options` asks ([`fill_channel`]), its
+/// refusal in weld words.
+fn fill_of(left: &[Seg2], right: &[Seg2], depth_normal: Option<Vec2>, options: &FillOptions) -> Result<ChannelFill> {
+    match fill_channel(left, right, depth_normal, options)? {
+        Ok(fill) => Ok(fill),
+        Err(refusal) => Err(GrooveRefusal::Fill { why: refusal.why, fit: refusal.fit }),
+    }
+}
+
+/// The step between butt plates whose square ends touch with no gap (T202): each wall one line
+/// once lines that carry straight on are one ([`merged`]), all four of their ends on one line
+/// square to the plates (within `tol` of the left toe along the frame's `x`). The right toe's
+/// level less the left one's; `None` for walls of another shape. shortcut: square ends square to
+/// the plates only; ends cut at an angle get the fill's refusal until asked for.
+fn step(left: &[Seg2], right: &[Seg2], tol: f64) -> Option<f64> {
+    let (l, r) = (merged(left, tol)?, merged(right, tol)?);
+    let ([Seg2::Line { a, b }], [Seg2::Line { a: p, b: q }]) = (l.as_slice(), r.as_slice()) else {
+        return None;
+    };
+    [b, p, q].iter().all(|v| (v.x - a.x).abs() <= tol).then_some(p.y - a.y)
+}
+
+/// How thick `pick`'s part is under the point `at` of its outer face (in the frame's plane): how far
+/// apart the first two faces a ray down along `-y` from 1 mm above meets are, the first its outer
+/// face. `None` where the ray does not meet the outer face first, or meets no second face.
+fn thickness_below(pick: &GroovePick<'_>, at: Vec2, piece: &Piece<'_>) -> Result<Option<f64>> {
+    let down = point(piece.frame.y).map(|v| -v);
+    let hits = pick.part.face_hits_by_ray(piece.in_space(Vec2::new(at.x, at.y + 1.0)), down)?;
+    Ok(match hits.as_slice() {
+        [top, under, ..] if top.face == pick.outer => Some(under.distance - top.distance),
+        _ => None,
+    })
+}
+
+/// The ISO 5817:2023 level B limit on linear misalignment between plates (Table 1, item 3.1, no.
+/// 5071), for `t` the smaller thickness: `0.1 t + 0.2` mm for plates 0.5 to 3 mm thick, else
+/// `0.1 t`, at most 3 mm. AWS D1.1 (butt joint alignment: 10 % of the thinner part, at most 1/8 in)
+/// gives the same over 3 mm. shortcut: level B, provisional until the weld tolerance settings
+/// (Q190) let the user pick another level.
+fn misalignment_limit(t: f64) -> f64 {
+    if t <= 3.0 { 0.1 * t + 0.2 } else { (0.1 * t).min(3.0) }
+}
+
+/// The notice for butt plates `offset` apart on the arrow side, `thickness` thick (left, right),
+/// where the offset is past [`misalignment_limit`] (T202). Only plates of one thickness (within
+/// `tol`): ISO 5817 measures from the centrelines "unless otherwise specified", and a model of
+/// plates of different thickness specifies where they sit. shortcut: a wall picked short of its
+/// plate's far side reads a thinner plate; read the plate's far face if that comes up.
+fn misalignment(offset: f64, thickness: [f64; 2], tol: f64) -> Option<WeldNote> {
+    let [l, r] = thickness;
+    if (l - r).abs() > tol {
+        return None;
+    }
+    let t = l.min(r);
+    let limit = misalignment_limit(t);
+    (offset > limit + tol).then(|| WeldNote {
+        text: format!(
+            "the plates are offset by {offset:.2} mm on the arrow side: linear misalignment (ISO 6520-1 no. 507) past ISO 5817 \
+             level B, {limit:.2} mm for plates {t:.2} mm thick"
+        ),
+        warning: false,
+    })
 }
 
 /// Whether `pick`'s part has a flat underside at `root` beside it, `side` along the frame's `x`
@@ -1135,6 +1311,8 @@ pub struct NoGroove {
     /// not (a thicker plate, an upright plate's side or a rib below the root), so no mark goes
     /// into a part.
     pub other: Option<Seam>,
+    /// What the weld tool tells the user: plates offset past ISO 5817 level B ([`misalignment`]).
+    pub notes: Vec<WeldNote>,
 }
 
 /// Where the seam runs on one welded side of a joint with no groove: along the joint through
@@ -1148,6 +1326,10 @@ pub struct Seam {
     pub normal: Vec2,
     /// The plate's thickness there, from this side's surface to the other's (mm).
     pub thickness: f64,
+    /// How far the other plate's surface beside the seam stands above this one's, along the normal
+    /// (mm; negative below): butt plates whose square ends touch with a step between them (T202).
+    /// 0 on the other side's seam.
+    pub step: f64,
 }
 
 /// The mark's default height above the surface (mm, Q98).
@@ -1165,7 +1347,9 @@ impl Seam {
 impl NoGroove {
     /// The flat mark on `seam`: a strip `width` wide, centred on the seam, standing `height`
     /// off the surface, along the whole joint (or stretch). Defaults: [`Seam::mark_width`],
-    /// [`MARK_HEIGHT`].
+    /// [`MARK_HEIGHT`]. Over a step ([`Seam::step`], on the arrow side) it lies on each plate's
+    /// own surface, climbing the step at 45° from the higher plate's edge, and runs on over the
+    /// lower plate `width / 2` from the step, or past the slope's foot by `height` (Q214).
     ///
     /// # Errors
     /// [`GrooveRefusal::Invalid`] for a width or height that is not finite and positive; the
@@ -1175,10 +1359,31 @@ impl NoGroove {
             return Err(GrooveRefusal::Invalid("a mark's width and height must be finite and positive"));
         }
         // the seam's normal is the frame's y or its opposite: the strip is square to the frame
-        let (x, y) = (seam.at.x, seam.at.y);
+        let (x, y, s) = (seam.at.x, seam.at.y, seam.step);
         let (lo, hi) = if seam.normal.y > 0.0 { (y, y + height) } else { (y - height, y) };
-        let corners =
-            [Vec2::new(x - width / 2.0, lo), Vec2::new(x + width / 2.0, lo), Vec2::new(x + width / 2.0, hi), Vec2::new(x - width / 2.0, hi)];
+        let corners = if seam.normal.y > 0.0 && s.abs() > 0.0 {
+            let (half, low) = (width / 2.0, (width / 2.0).max(s.abs() + height));
+            let (left, right) = if s < 0.0 { (half, low) } else { (low, half) };
+            let r = y + s;
+            // the slope's top: from the higher plate's edge, height up, down to the lower plate
+            let slope = if s < 0.0 {
+                [Vec2::new(x - s, r + height), Vec2::new(x, y + height)]
+            } else {
+                [Vec2::new(x, r + height), Vec2::new(x - s, y + height)]
+            };
+            vec![
+                Vec2::new(x - left, y),
+                Vec2::new(x, y),
+                Vec2::new(x, r),
+                Vec2::new(x + right, r),
+                Vec2::new(x + right, r + height),
+                slope[0],
+                slope[1],
+                Vec2::new(x - left, y + height),
+            ]
+        } else {
+            vec![Vec2::new(x - width / 2.0, lo), Vec2::new(x + width / 2.0, lo), Vec2::new(x + width / 2.0, hi), Vec2::new(x - width / 2.0, hi)]
+        };
         let region = Region2 { outer: Loop2::polygon(&corners), holes: Vec::new() };
         Ok(extrude_planar_regions(&self.frame, &[region], self.along[0], self.along[1])?)
     }
@@ -1290,7 +1495,7 @@ impl GrooveWeld {
     /// The fill's notes in weld words ([`FillNote`] says them in the kernel's).
     #[must_use]
     pub fn notes(&self) -> Vec<WeldNote> {
-        self.fill.notes.iter().map(|note| weld_note(note, self.zone)).collect()
+        self.fill.notes.iter().map(|note| weld_note(note, self.zone)).chain(self.own.iter().cloned()).collect()
     }
 }
 
@@ -1390,6 +1595,23 @@ fn fill_text(why: &FillFailure, fit: Option<f64>) -> String {
 /// #22033 review 6) shows a swept groove's tangent reads within it: its vertices are exact.
 const ALLOWANCE: f64 = 8.0;
 
+/// How far a groove face may drift across the joint from one end of it to the other (a draft, a
+/// sloppy model) and still be built with one section, read in the middle of the stretch, with no
+/// notice (T203, Q135): 1.6 mm, AWS D1.1's fit-up tolerance on a groove's root opening (±1/16 in).
+/// Further, the weld is lofted between its ends with a notice (Q215). shortcut: provisional, read
+/// from transcriptions of AWS D1.1's figure, not its text; per-type values come with the weld
+/// tolerance settings (Q190).
+pub const DRIFT: f64 = 1.6;
+
+/// How steeply an edge of a drifting groove face may run across the joint and still be read as
+/// running along it ([`face_read`]): a quarter of how far it runs along the joint (14°), far past
+/// any drift built and short of a face's end, which runs across the joint.
+const DRIFT_SLOPE: f64 = 0.25;
+
+/// One end of an edge, read along the joint: how far along `d` it lies (from the frame's origin)
+/// and where it lies in the frame's plane.
+type End = (f64, Vec2);
+
 /// A groove face read across the joint ([`face_read`]).
 struct FaceRead {
     /// The record face.
@@ -1398,6 +1620,54 @@ struct FaceRead {
     span: [f64; 2],
     /// Its section in the frame, where it reads as one line or arc.
     section: Option<Seg2>,
+    /// A plane drawn a little off straight (T203): its two runs, each from its start to its end
+    /// along the joint; its section anywhere along the joint is the line between them there
+    /// ([`FaceRead::section_at`]).
+    runs: Option<[[End; 2]; 2]>,
+}
+
+impl FaceRead {
+    /// Its section at `along` (along `d`, from the frame's origin).
+    fn section_at(&self, along: f64) -> Option<Seg2> {
+        match self.runs {
+            Some([a, b]) => Some(Seg2::Line { a: lerp(a, along), b: lerp(b, along) }),
+            None => self.section,
+        }
+    }
+
+    /// How far its runs move across the joint from end to end: none for a face straight along it.
+    fn drift(&self) -> f64 {
+        self.runs.map_or(0.0, |runs| runs.iter().filter_map(|&[p, q]| span(p.1, q.1)).fold(0.0, f64::max))
+    }
+}
+
+/// The point at `along` on the line through an edge's two ends `[p, q]`, `p` first along the joint
+/// and apart from `q` along it.
+fn lerp([p, q]: [End; 2], along: f64) -> Vec2 {
+    let k = (along - p.0) / (q.0 - p.0);
+    Vec2::new(p.1.x + (q.1.x - p.1.x) * k, p.1.y + (q.1.y - p.1.y) * k)
+}
+
+/// The edges of a face (`lines`: each with its two ends, in order along the joint) that run along
+/// the joint, gathered into runs, and the rest (its ends), by index. An edge runs along the joint
+/// where it reaches further than `tol` along it and its ends lie within `tol`, plus `slope` times
+/// that reach, of one point of the frame; it joins a run where its start lies on the line of the
+/// run's first edge, within `tol`.
+fn runs_of(lines: &[(usize, [End; 2])], tol: f64, slope: f64) -> (Vec<Vec<[End; 2]>>, Vec<usize>) {
+    let mut runs: Vec<Vec<[End; 2]>> = Vec::new();
+    let mut ends = Vec::new();
+    for &(e, [p, q]) in lines {
+        let reach = q.0 - p.0;
+        if reach <= tol || !near(p.1, q.1, tol + slope * reach) {
+            ends.push(e);
+            continue;
+        }
+        match runs.iter_mut().find(|r| r.first().is_some_and(|&first| near(lerp(first, p.0), p.1, tol))) {
+            Some(r) => r.push([p, q]),
+            None => runs.push(vec![[p, q]]),
+        }
+    }
+    (runs, ends)
 }
 
 /// Groove face `face` of `pick` read across the joint from its own edges (their vertices in the
@@ -1431,68 +1701,76 @@ fn face_read(pick: &GroovePick<'_>, part: JointPart, face: usize, frame: &Plane,
     if !through && record.faces.get(face).is_some_and(|f| f.loops.len() > 1) {
         return Err(GrooveRefusal::GrooveFaceInterrupted { part, face });
     }
-    // each run along the joint: its point in the frame and how far each of its edges reaches along d
-    let mut runs: Vec<(Vec2, Vec<[f64; 2]>)> = Vec::new();
-    // the edges across the joint (its ends), read for its section below
-    let mut ends: Vec<usize> = Vec::new();
+    let at = |p: [f64; 3]| Vec2::new(affine::distance_along(o, point(frame.x), p), affine::distance_along(o, point(frame.y), p));
+    // each edge's two ends, in order along d
+    let mut lines: Vec<(usize, [End; 2])> = Vec::new();
     for &e in &edges {
         let Some(&[a, b]) = record.edges.get(e).map(|edge| &edge.vertices) else { continue };
         let (Some(p), Some(q)) = (record.vertices.get(a as usize), record.vertices.get(b as usize)) else { continue };
         let (p, q) = (p.point, q.point);
-        let at = |p: [f64; 3]| Vec2::new(affine::distance_along(o, point(frame.x), p), affine::distance_along(o, point(frame.y), p));
-        let (s, t) = (affine::distance_along(o, d, p), affine::distance_along(o, d, q));
-        if !near(at(p), at(q), tol) || (t - s).abs() <= tol {
-            ends.push(e);
-            continue;
-        }
-        let reach = [s.min(t), s.max(t)];
-        match runs.iter_mut().find(|(x, _)| near(*x, at(p), tol)) {
-            Some((_, r)) => r.push(reach),
-            None => runs.push((at(p), vec![reach])),
-        }
+        let (p, q) = ((affine::distance_along(o, d, p), at(p)), (affine::distance_along(o, d, q), at(q)));
+        lines.push((e, if p.0 <= q.0 { [p, q] } else { [q, p] }));
+    }
+    let (mut runs, mut ends) = runs_of(&lines, tol, 0.0);
+    // a plane none of whose edges runs straight along the joint: drawn a little off straight (T203)
+    let mut drifting = false;
+    if runs.is_empty() && !through && pick.part.face_plane_normal(face)?.is_some() {
+        (runs, ends) = runs_of(&lines, tol, DRIFT_SLOPE);
+        drifting = !runs.is_empty();
     }
     if runs.is_empty() {
         return Ok(None);
     }
-    // each run's edges end to end; a gap between them is a notch in the face's edge
-    let mut whole: Vec<(Vec2, [f64; 2])> = Vec::new();
-    for (x, reaches) in &mut runs {
-        reaches.sort_by(|a, b| a[0].total_cmp(&b[0]));
-        let Some((&first, rest)) = reaches.split_first() else { continue };
-        let mut run = first;
+    // each run's edges end to end, its start and its end; a gap between them is a notch in the
+    // face's edge
+    let mut whole: Vec<[End; 2]> = Vec::new();
+    for mut run in runs {
+        run.sort_by(|a, b| a[0].0.total_cmp(&b[0].0));
+        let Some((&first, rest)) = run.split_first() else { continue };
+        let mut joined = first;
         for r in rest {
-            if !through && r[0] > run[1] + tol {
+            if !through && r[0].0 > joined[1].0 + tol {
                 return Err(GrooveRefusal::GrooveFaceInterrupted { part, face });
             }
-            run[1] = run[1].max(r[1]);
+            if r[1].0 > joined[1].0 {
+                joined[1] = r[1];
+            }
         }
-        whole.push((*x, run));
+        whole.push(joined);
     }
     let span = if through {
-        whole.iter().fold([f64::INFINITY, f64::NEG_INFINITY], |[lo, hi], &(_, [a, b])| [lo.min(a), hi.max(b)])
+        whole.iter().fold([f64::INFINITY, f64::NEG_INFINITY], |[lo, hi], &[a, b]| [lo.min(a.0), hi.max(b.0)])
     } else {
-        whole.iter().fold([f64::NEG_INFINITY, f64::INFINITY], |[lo, hi], &(_, [a, b])| [lo.max(a), hi.min(b)])
+        whole.iter().fold([f64::NEG_INFINITY, f64::INFINITY], |[lo, hi], &[a, b]| [lo.max(a.0), hi.min(b.0)])
     };
+    if drifting {
+        // shortcut: a drifting plane with other than two runs (a notched corner) is not read
+        return Ok(match whole.as_slice() {
+            &[a, b] => Some(FaceRead { face, span, section: None, runs: Some([a, b]) }),
+            _ => None,
+        });
+    }
     let agree = pick.part.planar_edges_tolerance().max(zone);
     let segs: Vec<Seg2> = pick.part.planar_edges(frame, &ends).into_iter().flatten().filter_map(|p| one_seg(&p)).collect();
     let from_ends = segs.split_first().and_then(|(a, rest)| rest.iter().all(|b| same(a, b, agree)).then_some(*a));
     let section = match (from_ends, whole.as_slice()) {
         (Some(s), _) => Some(s),
-        (None, [(a, _), (b, _)]) if pick.part.face_plane_normal(face)?.is_some() => Some(Seg2::Line { a: *a, b: *b }),
+        (None, [a, b]) if pick.part.face_plane_normal(face)?.is_some() => Some(Seg2::Line { a: a[0].1, b: b[0].1 }),
         _ => None,
     };
-    Ok(Some(FaceRead { face, span, section }))
+    Ok(Some(FaceRead { face, span, section, runs: None }))
 }
 
-/// A part's wall in the joint's frame, from its toe `toe` (in the frame) away from the face: each
-/// groove face's section ([`face_read`], from `reads`), each starting where the one before ends.
-/// `None` where a face has no section or does not start there.
-fn wall_of(reads: &[FaceRead], chain: &Chain, toe: Vec2, zone: f64) -> Option<Vec<Seg2>> {
+/// A part's wall in the joint's frame at `along` (along `d`, from the frame's origin), from its toe
+/// `toe` (in the frame) away from the face: each groove face's section there ([`face_read`], from
+/// `reads`), each starting where the one before ends. `None` where a face has no section or does
+/// not start there.
+fn wall_of(reads: &[FaceRead], chain: &Chain, toe: Vec2, along: f64, zone: f64) -> Option<Vec<Seg2>> {
     let tol = zone * ALLOWANCE;
     let mut wall: Vec<Seg2> = Vec::new();
     let mut at = toe;
     for face in &chain.faces {
-        let seg = reads.iter().find(|r| r.face == *face)?.section?;
+        let seg = reads.iter().find(|r| r.face == *face)?.section_at(along)?;
         let (a, b) = ends(&seg);
         let seg = if near(a, at, tol) {
             seg
@@ -1505,6 +1783,25 @@ fn wall_of(reads: &[FaceRead], chain: &Chain, toe: Vec2, zone: f64) -> Option<Ve
         wall.push(seg);
     }
     Some(wall)
+}
+
+/// The point at `along` (along `d`, from the frame's origin) of edge `edge` of `part`, in the frame's
+/// plane: its middle for an edge straight along the joint (within [`ALLOWANCE`]), else the line
+/// through its two vertices there (a toe drifting across the joint, T203). `None` for an edge
+/// with no two vertices.
+fn edge_at(part: &Body, edge: usize, piece: &Piece<'_>, along: f64) -> Result<Option<Vec2>> {
+    let record = part.record();
+    let Some(&[a, b]) = record.edges.get(edge).map(|e| &e.vertices) else { return Ok(None) };
+    let (Some(p), Some(q)) = (record.vertices.get(a as usize), record.vertices.get(b as usize)) else { return Ok(None) };
+    let o = point(piece.frame.origin);
+    let (p, q) = (
+        (affine::distance_along(o, piece.d, p.point), piece.in_frame(p.point)),
+        (affine::distance_along(o, piece.d, q.point), piece.in_frame(q.point)),
+    );
+    if near(p.1, q.1, piece.zone * ALLOWANCE) || (q.0 - p.0).abs() <= piece.zone * ALLOWANCE {
+        return Ok(Some(piece.in_frame(edge_middle(part, edge)?)));
+    }
+    Ok(Some(lerp(if p.0 <= q.0 { [p, q] } else { [q, p] }, along)))
 }
 
 /// The piece of one edge's read when it is a single line or arc.

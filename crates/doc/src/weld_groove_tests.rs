@@ -16,6 +16,11 @@
 //! hair past its ends still built as they should; two halves of one circle not taken for one
 //! section; a pick off the chain refused naming it; the fill's notes and refusals in weld words
 //! (ISO 6520-1 no. 511 as a warning on the weld face, no. 515 on the root side, full penetration).
+//! Plates not level filled from toe to toe with a notice past ISO 5817 level B, plates of
+//! different thickness with none; square ends touching with a step no groove, the mark following
+//! the step; a wall drawn with a draft built with one section within the drift tolerance and lofted
+//! past it with a notice, a plate a little off straight read as drifting; a weld that follows its
+//! parts when they move (T202, T203, T216).
 //! Ported from the second groove PR's first slice (solidcore `weld::groove::joint`, never pushed)
 //! onto ops reads, now through the kernel interface (#18500).
 
@@ -245,23 +250,22 @@ fn an_i_groove_takes_its_direction_from_a_wall_and_its_outer_face() {
     assert!(near(Vec3::new(n[0], n[1], n[2]), [0.0, 0.0, 1.0]), "{frame:?}");
 }
 
+/// T203: an I groove whose left plate is swept along a direction 0.01 rad off the right one's. No
+/// direction runs both walls straight, so one wall is set aside as drifting (1.2 mm over the 120):
+/// the right one, and the joint runs along the left plate.
 #[test]
-fn a_plate_not_straight_along_the_joint_is_refused() {
-    // an I groove whose left plate is swept along a direction 0.01 rad off the right one's
+fn a_plate_a_little_off_straight_along_the_joint_has_the_other_wall_read_as_drifting() {
     let (c, s) = (0.01_f64.cos(), 0.01_f64.sin());
     let tilted = Plane { origin: Vec3::new(0.0, 0.0, 0.0), x: Vec3::new(c, 0.0, s), y: Vec3::new(0.0, 1.0, 0.0) };
     let left = swept(&tilted, &[(-40.0, 0.0), (-40.0, -6.0), (-1.0, -6.0), (-1.0, 0.0)]);
     let right = plate(&[(1.0, 0.0), (1.0, -6.0), (40.0, -6.0), (40.0, 0.0)]);
     let (lf, rf) = (facing(&left, [c, 0.0, s]), facing(&right, [-1.0, 0.0, 0.0]));
     assert_eq!((lf.len(), rf.len()), (1, 1));
-    let got = joint(&[left, right], [&lf, &rf]).unwrap_err();
-    // no direction runs both walls straight; the wall named is the one that strays from the
-    // first direction tried, the cross product of a wall's normal and the outer faces'
-    let named = [
-        GrooveRefusal::GrooveFaceNotStraight { part: JointPart::Left, face: lf[0] },
-        GrooveRefusal::GrooveFaceNotStraight { part: JointPart::Right, face: rf[0] },
-    ];
-    assert!(named.contains(&got), "{got:?}");
+    let frame = joint(&[left, right], [&lf, &rf]).unwrap();
+    // along the left plate's sweep, x × y of `tilted`: (-s, 0, c), either way
+    let n = normal(&frame);
+    let along = |sign: f64| (n[0] + sign * s).abs() < 1e-6 && n[1].abs() < 1e-6 && (n[2] - sign * c).abs() < 1e-6;
+    assert!(along(1.0) || along(-1.0), "{frame:?}");
 }
 
 #[test]
@@ -1002,5 +1006,191 @@ fn a_tiny_rib_inside_the_mark_at_the_joint_s_end_leaves_no_seam_under_the_root()
             panic!("not NoGroove: {got:?}");
         };
         assert_eq!(no.other, None);
+    }
+}
+
+// ---- groove extras: plates not level (T202), walls a little off straight (T203), moved parts (T216) ----
+
+/// The Y groove of [`y_groove`] with the right plate `drop` lower (higher where negative).
+fn y_groove_dropped(drop: f64) -> ([Body; 2], [Vec<usize>; 2]) {
+    let t = 30.0_f64.to_radians().tan();
+    let top = 0.5 + 7.0 * t;
+    let left = plate(&[(-40.0, 0.0), (-40.0, -8.0), (-0.5, -8.0), (-0.5, -7.0), (-top, 0.0)]);
+    let right = plate(&[(top, -drop), (0.5, -7.0 - drop), (0.5, -8.0 - drop), (40.0, -8.0 - drop), (40.0, -drop)]);
+    let lf = [facing(&left, unit(1.0, t)), facing(&left, [1.0, 0.0, 0.0])].concat();
+    let rf = [facing(&right, unit(-1.0, t)), facing(&right, [-1.0, 0.0, 0.0])].concat();
+    assert_eq!((lf.len(), rf.len()), (2, 2), "{lf:?} {rf:?}");
+    ([left, right], [lf, rf])
+}
+
+/// The notes of a weld that speak of linear misalignment.
+fn offset_notes(notes: &[WeldNote]) -> Vec<&WeldNote> {
+    notes.iter().filter(|n| n.text.contains("ISO 6520-1 no. 507")).collect()
+}
+
+/// T202: butt plates not level are filled from toe to toe, from the higher toe down to the lower
+/// plate's underside; a notice says where the offset is past ISO 5817 level B (0.8 mm on 8 mm
+/// plates), never a warning. The depth s runs from the lower plate's surface (Q59), and blended
+/// toes are refused until T142.
+#[test]
+fn plates_not_level_are_filled_toe_to_toe_with_a_notice_past_iso_5817_level_b() {
+    for (drop, notice) in [(0.6, false), (2.0, true), (-2.0, true)] {
+        let (parts, faces) = y_groove_dropped(drop);
+        let before: Vec<_> = parts.iter().map(|b| b.record().clone()).collect();
+        let got = weld(&parts, &faces, &flat()).unwrap();
+        let (lo, hi) = bounds(&got.body);
+        assert!((hi[1] - (-drop).max(0.0)).abs() < 1e-6 && (lo[1] - (-8.0 + (-drop).min(0.0))).abs() < 1e-6, "{drop}: {lo:?} {hi:?}");
+        let notes = got.notes();
+        let offset = offset_notes(&notes);
+        assert_eq!(offset.len(), usize::from(notice), "{drop}: {notes:?}");
+        if let Some(note) = offset.first() {
+            assert!(note.text.contains("offset by 2.00 mm") && note.text.contains("0.80 mm for plates 8.00 mm thick") && !note.warning, "{note:?}");
+        }
+        let after: Vec<_> = parts.iter().map(|b| b.record().clone()).collect();
+        assert_eq!(after, before);
+    }
+    let (parts, faces) = y_groove_dropped(2.0);
+    // s = 4 from the lower plate's surface, 2 below the left one's
+    let partial = FillOptions { depth: Some(4.0), ..flat() };
+    let (lo, _) = bounds(&weld(&parts, &faces, &partial).unwrap().body);
+    assert!((lo[1] + 6.0).abs() < 1e-6, "{lo:?}");
+    let blended = FillOptions { face: Contour::ConvexBlended { height: 1.0, overlap: 2.0 }, ..flat() };
+    let got = weld(&parts, &faces, &blended).unwrap_err();
+    assert!(matches!(got, GrooveRefusal::Fill { why: FillFailure::BlendedToesOffChord { .. }, .. }), "{got:?}");
+}
+
+/// T202: plates of different thickness (8 and 10, an I groove with a gap of 1) whose tops are 1 apart
+/// get no misalignment notice: ISO 5817 measures from the centrelines unless otherwise specified,
+/// and the model specifies where they sit.
+#[test]
+fn plates_of_different_thickness_get_no_misalignment_notice() {
+    let left = plate(&[(-40.0, 0.0), (-40.0, -8.0), (-0.5, -8.0), (-0.5, 0.0)]);
+    let right = plate(&[(0.5, -1.0), (0.5, -11.0), (40.0, -11.0), (40.0, -1.0)]);
+    let faces = [facing(&left, [1.0, 0.0, 0.0]), facing(&right, [-1.0, 0.0, 0.0])];
+    let got = weld(&[left, right], &faces, &flat()).unwrap();
+    assert!(offset_notes(&got.notes()).is_empty(), "{:?}", got.notes());
+}
+
+/// T202, Q214: square ends touching with a step between them are no groove. The arrow side's mark
+/// lies on each plate's own surface and climbs the step at 45° (its section the two strips, 6 wide
+/// in all, and the triangle the slope adds, step² / 2); no seam under the plates, whose undersides
+/// step too; a notice past level B (0.6 mm on 6 mm plates).
+#[test]
+fn square_ends_touching_with_a_step_are_no_groove_their_mark_following_it() {
+    for (step, notice) in [(-0.4, false), (0.4, false), (-1.0, true)] {
+        let left = plate(&[(-40.0, 0.0), (-40.0, -6.0), (0.0, -6.0), (0.0, 0.0)]);
+        let right = plate(&[(0.0, step), (0.0, step - 6.0), (40.0, step - 6.0), (40.0, step)]);
+        let faces = [facing(&left, [1.0, 0.0, 0.0]), facing(&right, [-1.0, 0.0, 0.0])];
+        let got = weld(&[left, right], &faces, &flat()).unwrap_err();
+        let GrooveRefusal::NoGroove(no) = got else {
+            panic!("{step}: not NoGroove: {got:?}");
+        };
+        assert!((no.arrow.step - step).abs() < 1e-9 && (no.arrow.thickness - 6.0).abs() < 1e-9 && no.other.is_none(), "{no:?}");
+        let mark = no.mark(&no.arrow, no.arrow.mark_width(), MARK_HEIGHT).unwrap();
+        let volume = mark.volume_at(1e-9).unwrap();
+        let want = 120.0 * (6.0 * MARK_HEIGHT + step * step / 2.0);
+        assert!((volume - want).abs() <= 1e-6 * want, "{step}: {volume} != {want}");
+        let (lo, hi) = bounds(&mark);
+        assert!((lo[0] + 3.0).abs() < 1e-6 && (hi[0] - 3.0).abs() < 1e-6, "{step}: {lo:?} {hi:?}");
+        assert!((lo[1] - step.min(0.0)).abs() < 1e-6 && (hi[1] - (step.max(0.0) + MARK_HEIGHT)).abs() < 1e-6, "{step}: {lo:?} {hi:?}");
+        let offset = offset_notes(&no.notes);
+        assert_eq!(offset.len(), usize::from(notice), "{step}: {:?}", no.notes);
+        if let Some(note) = offset.first() {
+            assert!(note.text.contains("offset by 1.00 mm") && note.text.contains("0.60 mm for plates 6.00 mm thick"), "{note:?}");
+        }
+    }
+}
+
+/// The right plate of [`y_groove`] drawn with a draft: swept along a direction tilted by `a` about
+/// y, then cut square at z = 0 and z = 120, so its bevel and root face drift `120 tan a` across
+/// the joint (T203); at z its points stand `x / cos a + z tan a` along x. The plate and its groove
+/// faces (bevel, then root face).
+fn drafted_right(a: f64) -> (Body, Vec<usize>) {
+    let t = 30.0_f64.to_radians().tan();
+    let top = 0.5 + 7.0 * t;
+    let (c, s) = (a.cos(), a.sin());
+    let tilted = Plane { origin: Vec3::new(0.0, 0.0, 0.0), x: Vec3::new(c, 0.0, -s), y: Vec3::new(0.0, 1.0, 0.0) };
+    let pts: Vec<Vec2> = [(top, 0.0), (0.5, -7.0), (0.5, -8.0), (40.0, -8.0), (40.0, 0.0)].iter().map(|&(x, y)| Vec2::new(x, y)).collect();
+    let prism = extrude_planar_regions(&tilted, &[Region2 { outer: Loop2::polygon(&pts), holes: Vec::new() }], -10.0, 140.0).unwrap();
+    let block = plate(&[(0.0, 1.0), (0.0, -9.0), (50.0, -9.0), (50.0, 1.0)]);
+    let right = boolean(&prism, &block, BoolOp::Intersect).unwrap().unwrap();
+    let close = |n: [f64; 3]| {
+        (0..right.record().faces.len())
+            .filter(|&f| right.face_plane_normal(f).unwrap().is_some_and(|m| m.value.iter().zip(n).all(|(a, b)| (a - b).abs() < 0.05)))
+            .collect::<Vec<_>>()
+    };
+    let faces = [close(unit(-1.0, t)), close([-1.0, 0.0, 0.0])].concat();
+    assert_eq!(faces.len(), 2, "{faces:?}");
+    (right, faces)
+}
+
+/// The groove section's area of [`y_groove`] with its right wall where [`drafted_right`] puts it at
+/// z: moved `x (1 / cos a - 1) + z tan a` along x at each point x of it.
+fn drafted_area(a: f64, z: f64) -> f64 {
+    let t = 30.0_f64.to_radians().tan();
+    let top = 0.5 + 7.0 * t;
+    // ∫ x dy over the right wall: the bevel from x = top down to 0.5 over 7, the root face at 0.5 over 1
+    let wall = 3.5 * (top + 0.5) + 0.5;
+    8.0 + 49.0 * t + (1.0 / a.cos() - 1.0) * wall + 8.0 * z * a.tan()
+}
+
+/// T203: a right plate whose bevel drifts 1.2 mm over the 120 (within the 1.6 mm of [`DRIFT`]) is
+/// built with one section, the one in the middle of the joint, with no notice.
+#[test]
+fn a_wall_drawn_with_a_draft_within_the_tolerance_is_built_with_one_section() {
+    let a = 0.01_f64.atan();
+    let ([left, _], [lf, _]) = y_groove();
+    let (right, rf) = drafted_right(a);
+    let got = weld(&[left, right], &[lf, rf], &flat()).unwrap();
+    assert!(got.notes().is_empty(), "{:?}", got.notes());
+    let volume = got.body.volume_at(1e-9).unwrap();
+    let want = 120.0 * drafted_area(a, 60.0);
+    assert!((volume - want).abs() <= 1e-6 * want, "{volume} != {want}");
+    let (lo, hi) = bounds(&got.body);
+    let top = 0.5 + 7.0 * 30.0_f64.to_radians().tan();
+    assert!(lo[2].abs() < 1e-6 && (hi[2] - 120.0).abs() < 1e-6, "{lo:?} {hi:?}");
+    assert!((lo[0] + top).abs() < 1e-6 && (hi[0] - (top / a.cos() + 60.0 * a.tan())).abs() < 1e-6, "{lo:?} {hi:?}");
+}
+
+/// T203, Q215: a bevel drifting 4 mm over the 120, past [`DRIFT`]: the weld is lofted between the
+/// fills at its two ends and follows the wall, with a notice naming the face and its drift. Its
+/// section grows evenly along the joint, so its volume is the middle section's times 120.
+#[test]
+fn a_wall_drifting_past_the_tolerance_is_lofted_end_to_end_with_a_notice() {
+    let a = (4.0_f64 / 120.0).atan();
+    let ([left, _], [lf, _]) = y_groove();
+    let (right, rf) = drafted_right(a);
+    let got = weld(&[left, right], &[lf, rf.clone()], &flat()).unwrap();
+    let notes = got.notes();
+    assert!(notes.iter().any(|n| n.text.contains("of the Right part drifts 4.00 mm") && !n.warning), "{notes:?}");
+    assert!(rf.iter().any(|f| notes.iter().any(|n| n.text.starts_with(&format!("face {f} ")))), "{notes:?}");
+    let volume = got.body.volume_at(1e-9).unwrap();
+    let want = 120.0 * drafted_area(a, 60.0);
+    assert!((volume - want).abs() <= 1e-4 * want, "{volume} != {want}");
+    let (_, hi) = bounds(&got.body);
+    let top = 0.5 + 7.0 * 30.0_f64.to_radians().tan();
+    assert!((hi[0] - (top / a.cos() + 120.0 * a.tan())).abs() < 1e-6 && (hi[2] - 120.0).abs() < 1e-6, "{hi:?}");
+}
+
+/// T216: parts turned and moved together give the weld turned and moved with them (the same body
+/// within 1e-6 of its volume), the picks by record index as the app keeps them.
+#[test]
+fn a_groove_weld_follows_its_parts_when_they_move() {
+    let (parts, faces) = y_groove();
+    let outer = [facing(&parts[0], UP)[0], facing(&parts[1], UP)[0]];
+    let before = weld(&parts, &faces, &flat()).unwrap();
+    let moved =
+        |b: &Body| solidcraft_kernel::transform(b, Vec3::new(10.0, -5.0, 3.0), Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 1.0, 1.0), 0.7).unwrap();
+    let parts_moved = [moved(&parts[0]), moved(&parts[1])];
+    let picks = [
+        GroovePick { part: &parts_moved[0], faces: &faces[0], outer: outer[0] },
+        GroovePick { part: &parts_moved[1], faces: &faces[1], outer: outer[1] },
+    ];
+    let after = groove_weld([&picks[0], &picks[1]], &flat()).unwrap();
+    let want = moved(&before.body);
+    let volume = want.volume_at(1e-9).unwrap();
+    for (a, b) in [(&after.body, &want), (&want, &after.body)] {
+        let left = boolean(a, b, BoolOp::Cut).unwrap().map_or(0.0, |rest| rest.volume_at(1e-9).unwrap());
+        assert!(left <= 1e-6 * volume, "{left} of {volume}");
     }
 }
